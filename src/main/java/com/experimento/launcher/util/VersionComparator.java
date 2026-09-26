@@ -58,4 +58,22 @@ public final class VersionComparator {
 
         return true;
     }
+
+    /**
+     * Compara dos versiones (ej: "9.10.1" vs "9.6").
+     * @return >0 si v1 > v2, <0 si v1 < v2, 0 si iguales.
+     */
+    public static int compare(String v1, String v2) {
+        String[] p1 = v1.replaceAll("[^0-9.]", "").split("\\.");
+        String[] p2 = v2.replaceAll("[^0-9.]", "").split("\\.");
+        int len = Math.max(p1.length, p2.length);
+        for (int i = 0; i < len; i++) {
+            int n1 = i < p1.length && !p1[i].isEmpty() ? Integer.parseInt(p1[i]) : 0;
+            int n2 = i < p2.length && !p2[i].isEmpty() ? Integer.parseInt(p2[i]) : 0;
+            if (n1 != n2) {
+                return Integer.compare(n1, n2);
+            }
+        }
+        return 0;
+    }
 }

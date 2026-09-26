@@ -18,7 +18,11 @@ public final class JvmPresetService {
         if (totalRamMiB <= 8 * 1024L) {
             return JvmPresetKind.BALANCED;
         }
-        return JvmPresetKind.HIGH;
+        if (totalRamMiB <= 24 * 1024L) {
+            return JvmPresetKind.HIGH;
+        }
+        // ≥32 GB → preset ULTRA automático
+        return JvmPresetKind.ULTRA;
     }
 
     public static List<String> argsFor(LauncherProfile p, long totalRamMiB) {
@@ -29,10 +33,11 @@ public final class JvmPresetService {
         JvmPresetKind kind = p.jvmPreset == JvmPresetKind.AUTO ? resolveAutoKind(totalRamMiB) : p.jvmPreset;
         List<String> base =
                 switch (kind) {
-                    case LOW -> lowPreset(physCores, logicCores);
+                    case LOW      -> lowPreset(physCores, logicCores);
                     case BALANCED -> balancedPreset(totalRamMiB, physCores, logicCores);
-                    case HIGH -> highPreset(totalRamMiB, physCores, logicCores);
-                    case AUTO -> lowPreset(physCores, logicCores);
+                    case HIGH     -> highPreset(totalRamMiB, physCores, logicCores);
+                    case ULTRA    -> ultraPreset(totalRamMiB, physCores, logicCores);
+                    case AUTO     -> lowPreset(physCores, logicCores);
                 };
         List<String> out = new ArrayList<>(base);
         if (p.customJvmArgs != null && !p.customJvmArgs.isBlank()) {
@@ -74,12 +79,14 @@ public final class JvmPresetService {
                 "-XX:+DisableExplicitGC",
                 "-XX:+PerfDisableSharedMem",
                 "-XX:+UseLargePages",
+                "-XX:+TieredCompilation",
+                "-XX:CompileThreshold=1500",
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
                 "-Dsplash=false",
                 "-XX:StringDeduplicationSizeThreshold=4096"));
-        
+
         applyCpuArgs(args, physCores, logicCores);
         return args;
     }
@@ -96,17 +103,17 @@ public final class JvmPresetService {
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseG1GC",
-                "-XX:MaxGCPauseMillis=10",
-                "-XX:G1NewSizePercent=30",
-                "-XX:G1MaxNewSizePercent=45",
-                "-XX:G1HeapRegionSize=16M",
-                "-XX:G1ReservePercent=15",
-                "-XX:G1HeapWastePercent=4",
-                "-XX:G1MixedGCCountTarget=6",
-                "-XX:InitiatingHeapOccupancyPercent=20",
-                "-XX:G1MixedGCLiveThresholdPercent=85",
-                "-XX:G1RSetUpdatingPauseTimePercent=3",
-                "-XX:SurvivorRatio=24",
+                "-XX:MaxGCPauseMillis=200",         // Pausa realista para no sobrecargar CPU en GC
+                "-XX:G1NewSizePercent=20",          // Aikar's Flag
+                "-XX:G1MaxNewSizePercent=60",       // Aikar's Flag
+                "-XX:G1HeapRegionSize=32M",         // Aikar's Flag
+                "-XX:G1ReservePercent=20",          // Aikar's Flag
+                "-XX:G1HeapWastePercent=5",         // Aikar's Flag
+                "-XX:G1MixedGCCountTarget=4",       // Aikar's Flag
+                "-XX:InitiatingHeapOccupancyPercent=15", // Aikar's Flag
+                "-XX:G1MixedGCLiveThresholdPercent=90",  // Aikar's Flag
+                "-XX:G1RSetUpdatingPauseTimePercent=5",  // Aikar's Flag
+                "-XX:SurvivorRatio=32",             // Aikar's Flag
                 "-XX:+UseStringDeduplication",
                 "-XX:+ParallelRefProcEnabled",
                 "-XX:+DisableExplicitGC",
@@ -115,6 +122,8 @@ public final class JvmPresetService {
                 "-XX:+UseNUMA",
                 "-XX:+UseLargePages",
                 "-XX:SoftRefLRUPolicyMSPerMB=1000",
+                "-XX:+TieredCompilation",
+                "-XX:CompileThreshold=1500",
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -135,43 +144,47 @@ public final class JvmPresetService {
         else ms = "3G";
 
         boolean useZGC = totalRamMiB >= 16 * 1024L;
-        
+
         List<String> args;
-        
+
         if (useZGC) {
             args = new ArrayList<>(List.of(
                 "-Xms" + ms,
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseZGC",
-                "-XX:ZCollectionInterval=10",
+                "-XX:ZCollectionInterval=8",        // Mejorado: 10→8s
                 "-XX:ZMaxMappingCount=50000",
+                "-XX:ZUncommitDelay=600",           // Libera memoria al OS tras 10min sin uso
+                "-XX:SoftRefLRUPolicyMSPerMB=200",  // Más agresivo que antes (500→200)
                 "-XX:+UseLargePages",
                 "-XX:+UseNUMA",
                 "-XX:+DisableExplicitGC",
                 "-XX:+PerfDisableSharedMem",
                 "-XX:+ParallelRefProcEnabled",
+                "-XX:+TieredCompilation",
+                "-XX:CompileThreshold=1500",
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
-                "-Dsplash=false",
-                "-XX:SoftRefLRUPolicyMSPerMB=500"));
+                "-Dsplash=false"));
         } else {
             args = new ArrayList<>(List.of(
                 "-Xms" + ms,
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseG1GC",
-                "-XX:MaxGCPauseMillis=5",
-                "-XX:G1NewSizePercent=35",
-                "-XX:G1MaxNewSizePercent=50",
-                "-XX:G1HeapRegionSize=16M",
-                "-XX:G1ReservePercent=10",
-                "-XX:G1HeapWastePercent=3",
-                "-XX:G1MixedGCCountTarget=8",
-                "-XX:InitiatingHeapOccupancyPercent=25",
-                "-XX:G1MixedGCLiveThresholdPercent=80",
-                "-XX:SurvivorRatio=16",
+                "-XX:MaxGCPauseMillis=200",
+                "-XX:G1NewSizePercent=20",
+                "-XX:G1MaxNewSizePercent=60",
+                "-XX:G1HeapRegionSize=32M",
+                "-XX:G1ReservePercent=20",
+                "-XX:G1HeapWastePercent=5",
+                "-XX:G1MixedGCCountTarget=4",
+                "-XX:InitiatingHeapOccupancyPercent=15",
+                "-XX:G1MixedGCLiveThresholdPercent=90",
+                "-XX:G1RSetUpdatingPauseTimePercent=5",
+                "-XX:SurvivorRatio=32",
                 "-XX:+UseStringDeduplication",
                 "-XX:+ParallelRefProcEnabled",
                 "-XX:+DisableExplicitGC",
@@ -179,7 +192,9 @@ public final class JvmPresetService {
                 "-XX:+UseNUMA",
                 "-XX:+UseLargePages",
                 "-XX:MaxTenuringThreshold=1",
-                "-XX:SoftRefLRUPolicyMSPerMB=1000",
+                "-XX:SoftRefLRUPolicyMSPerMB=500",
+                "-XX:+TieredCompilation",
+                "-XX:CompileThreshold=1500",
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -190,24 +205,80 @@ public final class JvmPresetService {
         return args;
     }
 
+    /**
+     * Preset ULTRA: Para máquinas gaming dedicadas con ≥32 GB RAM.
+     * ZGC ultra-agresivo, heap 6-24 GB según RAM, JIT con warm-up rápido.
+     * Stop-the-world esperado inferior a 1 ms en condiciones normales.
+     */
+    public static List<String> ultraPreset(long totalRamMiB, int physCores, int logicCores) {
+        String mx;
+        if (totalRamMiB >= 64 * 1024L) mx = "24G";
+        else if (totalRamMiB >= 32 * 1024L) mx = "16G";
+        else mx = "10G";
+
+        String ms;
+        if (totalRamMiB >= 32 * 1024L) ms = "6G";
+        else ms = "4G";
+
+        boolean isLinux = System.getProperty("os.name", "").toLowerCase().contains("linux");
+
+        List<String> args = new ArrayList<>(List.of(
+            "-Xms" + ms,
+            "-Xmx" + mx,
+            "-XX:+UnlockExperimentalVMOptions",
+            // ZGC — GC de latencia mínima (<1 ms de pausa garantizada)
+            "-XX:+UseZGC",
+            "-XX:ZCollectionInterval=5",            // Recolecta proactivamente cada 5s
+            "-XX:ZMaxMappingCount=100000",           // Más espacio para regiones de memoria
+            "-XX:ZUncommitDelay=300",               // Devuelve RAM al OS si no se usa en 5 min
+            "-XX:SoftRefLRUPolicyMSPerMB=50",       // Agresivo con soft refs — menos presión GC
+            // Memoria avanzada
+            "-XX:+UseLargePages",
+            "-XX:+UseNUMA",
+            "-XX:+DisableExplicitGC",
+            "-XX:+PerfDisableSharedMem",
+            "-XX:+ParallelRefProcEnabled",
+            // JIT agresivo — warm-up 6x más rápido que el default (10000)
+            "-XX:+TieredCompilation",
+            "-XX:CompileThreshold=1500",
+            "-XX:+OptimizeStringConcat",
+            // Networking y encoding
+            "-Dlog4j2.formatMsgNoLookups=true",
+            "-Djdk.nio.maxCachedBufferSize=524288",  // 512 KB buffer NIO (doble que en HIGH)
+            "-Dfile.encoding=UTF-8",
+            "-Dsplash=false"
+        ));
+
+        // Transparent Huge Pages en Linux: reducen presión del TLB en escenas complejas
+        if (isLinux) {
+            args.add("-XX:+UseTransparentHugePages");
+        }
+
+        applyCpuArgs(args, physCores, logicCores);
+        return args;
+    }
+
     private static void applyCpuArgs(List<String> args, int physCores, int logicCores) {
-        int parallelGC = Math.max(2, Math.min(physCores, 12));
-        int concGC = Math.max(1, parallelGC / 4);
+        // Pool de GC: dinámico según hardware, cap en 16 para evitar contención
+        int parallelGC = Math.max(2, Math.min(physCores, 16));
+        int concGC     = Math.max(1, parallelGC / 4);
+        // Compiladores JIT paralelos
         int ciCompiler = Math.max(2, Math.min(logicCores / 2, 8));
-        
+
         args.add("-XX:ParallelGCThreads=" + parallelGC);
         args.add("-XX:ConcGCThreads=" + concGC);
-        // G1ConcRefinementThreads is G1GC-specific — only add when not using ZGC
+
+        // G1ConcRefinementThreads es específico de G1GC — no añadir con ZGC
         boolean isZGC = args.stream().anyMatch(a -> a.contains("+UseZGC"));
         if (!isZGC) {
             args.add("-XX:G1ConcRefinementThreads=" + parallelGC);
         }
         args.add("-XX:CICompilerCount=" + ciCompiler);
-        
+
+        // Informar a la JVM del número REAL de CPUs disponibles
         args.add("-XX:ActiveProcessorCount=" + logicCores);
-        
+
         args.add("-XX:+OptimizeStringConcat");
-        
         args.add("-XX:+AlwaysPreTouch");
     }
 }

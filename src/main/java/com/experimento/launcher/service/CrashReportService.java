@@ -112,9 +112,11 @@ public final class CrashReportService {
 
         Files.writeString(reportFile, report.toString(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         
-        // Reportar a Supabase si hubo un error real
+        // Reportar a Supabase si hubo un error real (Asíncrono para no bloquear la salida)
         if (hasCrashed) {
-            SupabaseService.reportCrash(report.toString(), com.experimento.launcher.LauncherMetadata.VERSION);
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                SupabaseService.reportCrash(report.toString(), com.experimento.launcher.LauncherMetadata.VERSION);
+            }, java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
         }
 
         return reportFile;

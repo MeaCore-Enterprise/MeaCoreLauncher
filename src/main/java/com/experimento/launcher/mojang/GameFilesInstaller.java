@@ -64,7 +64,7 @@ public final class GameFilesInstaller {
         }
 
         List<Future<?>> libFutures = new ArrayList<>();
-        try (ExecutorService libPool = Executors.newFixedThreadPool(Math.min(DOWNLOAD_THREADS, libraries.size() + 1))) {
+        try (ExecutorService libPool = Executors.newVirtualThreadPerTaskExecutor()) {
             for (JsonNode lib : libraries) {
                 libFutures.add(libPool.submit(() -> {
                     try {
@@ -141,7 +141,7 @@ public final class GameFilesInstaller {
         Path objectsDir = assetsDir.resolve("objects");
         Files.createDirectories(objectsDir);
         List<Future<?>> assetFutures = new ArrayList<>();
-        try (ExecutorService pool = Executors.newFixedThreadPool(DOWNLOAD_THREADS)) {
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
             objects.fields().forEachRemaining(e -> {
                 JsonNode h = e.getValue();
                 String hash = h.get("hash").asText();
@@ -206,7 +206,29 @@ public final class GameFilesInstaller {
         }
 
         if (!downloaded && lib.has("name")) {
-            downloadMavenLibrary(lib.get("name").asText());
+            String nameToDownload = lib.get("name").asText();
+            boolean isLegacyNative = lib.has("natives");
+            if (isLegacyNative) {
+                JsonNode nativesObj = lib.get("natives");
+                String osName = os.name().toLowerCase();
+                String key = osName.contains("win") ? "windows" : (osName.contains("mac") ? "osx" : "linux");
+                if (nativesObj.has(key)) {
+                    String classifier = nativesObj.get(key).asText().replace("${arch}", os.arch().contains("64") ? "64" : "32");
+                    nameToDownload += ":" + classifier;
+                }
+            }
+            
+            downloadMavenLibrary(nameToDownload);
+            
+            if (isLegacyNative) {
+                Path zipPath = librariesDir.resolve(nameToPath(nameToDownload));
+                if (Files.exists(zipPath)) {
+                    synchronized (nativesDir) {
+                        progress.log("📦 Extrayendo nativo legacy: " + libName);
+                        extractNatives(zipPath, nativesDir);
+                    }
+                }
+            }
         }
 
         if (downloads != null && downloads.has("classifiers")) {

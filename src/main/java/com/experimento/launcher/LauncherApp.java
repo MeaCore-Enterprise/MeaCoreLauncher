@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LauncherApp extends Application {
 
-    private final ExecutorService workers = Executors.newFixedThreadPool(16);
+    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final List<ManifestVersionEntry> allManifestEntries = FXCollections.observableArrayList();
     
     private boolean syncingVersionUi;
@@ -516,7 +516,7 @@ public class LauncherApp extends Application {
 
         Label modloaderTitle = new Label("🔧 Gestión de Modloaders");
         modloaderTitle.setStyle("-fx-text-fill: white; -fx-font-size: 15px; -fx-font-weight: bold;");
-        Label modloaderDesc = new Label("Instala Forge, Fabric o NeoForge — ahora con selector de versión exacta.");
+        Label modloaderDesc = new Label("Instala Forge, NeoForge, Fabric o Quilt — ahora con selector de versión exacta.");
         modloaderDesc.setStyle("-fx-text-fill: #aaaaaa; -fx-font-size: 12px;");
 
         modLoaderBadgeLabel = new Label("Modloader activo: (selecciona un perfil)");
@@ -529,8 +529,8 @@ public class LauncherApp extends Application {
         Label perfTitle = new Label("⚡ Mods de Rendimiento (GRATIS)");
         perfTitle.setStyle("-fx-text-fill: white; -fx-font-size: 15px; -fx-font-weight: bold;");
         Label perfDesc = new Label(
-            "Instala automáticamente Sodium, Lithium, FerriteCore e ImmediatelyFast.\n" +
-            "Pueden subir los FPS de 30 a 60+ en modpacks pesados. Requiere Fabric, Forge o NeoForge.");
+            "Instala automáticamente Sodium, Lithium, FerriteCore, ImmediatelyFast y más.\n" +
+            "Pueden subir los FPS de 30 a 100+ en modpacks pesados. Requiere Fabric, Quilt, Forge o NeoForge.");
         perfDesc.setWrapText(true);
         perfDesc.setStyle("-fx-text-fill: #aaaaaa; -fx-font-size: 12px;");
         Button perfModsBtn = new Button("🚀 Instalar Mods de Rendimiento");
@@ -653,7 +653,7 @@ public class LauncherApp extends Application {
         }
         String loader = selected.modLoader != null ? selected.modLoader : "vanilla";
         if (!PerformanceModsService.isSupported(loader)) {
-            log("[PERF] Este perfil no tiene modloader activo. Instala Fabric, Forge o NeoForge primero desde la pestaña Modding.");
+            log("[PERF] Este perfil no tiene modloader activo. Instala Fabric, Quilt, Forge o NeoForge primero desde la pestaña Modding.");
             btn.setDisable(false); btn.setText("🚀 Instalar Mods de Rendimiento");
             return;
         }
@@ -1277,21 +1277,26 @@ public class LauncherApp extends Application {
         hint.setWrapText(true);
 
         Button forgeBtn = new Button("⚙  Forge");
-        forgeBtn.setPrefWidth(155);
-        forgeBtn.setStyle("-fx-background-color: #b07833; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 14; -fx-background-radius: 6;");
+        forgeBtn.setPrefWidth(125);
+        forgeBtn.setStyle("-fx-background-color: #b07833; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 12; -fx-background-radius: 6;");
         forgeBtn.setOnAction(e -> showModloaderStep2("Forge"));
 
         Button neoforgeBtn = new Button("🔥  NeoForge");
-        neoforgeBtn.setPrefWidth(155);
-        neoforgeBtn.setStyle("-fx-background-color: #c0522a; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 14; -fx-background-radius: 6;");
+        neoforgeBtn.setPrefWidth(125);
+        neoforgeBtn.setStyle("-fx-background-color: #c0522a; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 12; -fx-background-radius: 6;");
         neoforgeBtn.setOnAction(e -> showModloaderStep2("NeoForge"));
 
         Button fabricBtn = new Button("🪡  Fabric");
-        fabricBtn.setPrefWidth(155);
-        fabricBtn.setStyle("-fx-background-color: #4a7c40; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 14; -fx-background-radius: 6;");
+        fabricBtn.setPrefWidth(125);
+        fabricBtn.setStyle("-fx-background-color: #4a7c40; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 12; -fx-background-radius: 6;");
         fabricBtn.setOnAction(e -> showModloaderStep2("Fabric"));
 
-        Label forgeNote = new Label("Forge: 1.12.2–1.20.1  ·  NeoForge: 1.20.2+ (recomendado)  ·  Fabric: todas las versiones");
+        Button quiltBtn = new Button("🧵  Quilt");
+        quiltBtn.setPrefWidth(125);
+        quiltBtn.setStyle("-fx-background-color: #5c3d75; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 11 12; -fx-background-radius: 6;");
+        quiltBtn.setOnAction(e -> showModloaderStep2("Quilt"));
+
+        Label forgeNote = new Label("Forge: 1.12.2–1.20.1  ·  NeoForge: 1.20.2+  ·  Fabric / Quilt: 1.14+ (compatible con mods Fabric)");
         forgeNote.setStyle("-fx-text-fill: #555555; -fx-font-size: 11px;");
         forgeNote.setWrapText(true);
 
@@ -1299,7 +1304,7 @@ public class LauncherApp extends Application {
         cancelBtn1.setStyle("-fx-background-color: transparent; -fx-border-color: #555555; -fx-border-radius: 5; -fx-text-fill: #aaaaaa; -fx-padding: 8 16;");
         cancelBtn1.setOnAction(e -> modloaderOverlay.setVisible(false));
 
-        HBox loaderBtns = new HBox(10, forgeBtn, neoforgeBtn, fabricBtn);
+        HBox loaderBtns = new HBox(8, forgeBtn, neoforgeBtn, fabricBtn, quiltBtn);
         loaderBtns.setAlignment(Pos.CENTER);
         HBox cancel1Row = new HBox(cancelBtn1);
         cancel1Row.setAlignment(Pos.CENTER_RIGHT);
@@ -1382,6 +1387,12 @@ public class LauncherApp extends Application {
                         }
                         yield com.experimento.launcher.modloaders.ModloaderVersionService.getFabricLoaderVersions(mcVersion);
                     }
+                    case "Quilt" -> {
+                        if (!com.experimento.launcher.modloaders.ModloaderVersionService.isQuiltSupported(mcVersion)) {
+                            throw new Exception("Quilt no soporta Minecraft " + mcVersion + ". Usa Forge para versiones antiguas (1.14-).");
+                        }
+                        yield com.experimento.launcher.modloaders.ModloaderVersionService.getQuiltLoaderVersions(mcVersion);
+                    }
                     case "NeoForge" -> com.experimento.launcher.modloaders.ModloaderVersionService.getNeoForgeVersions(mcVersion);
                     default -> List.of();
                 };
@@ -1429,6 +1440,8 @@ public class LauncherApp extends Application {
                     case "NeoForge" -> ModloaderInstallerService.installNeoForgeSpecific(mcVersion, specificVersion, baseDir,
                             msg -> Platform.runLater(() -> log(msg)), runtime);
                     case "Fabric" -> ModloaderInstallerService.installFabricSpecific(mcVersion, specificVersion, baseDir,
+                            msg -> Platform.runLater(() -> log(msg)), runtime);
+                    case "Quilt" -> ModloaderInstallerService.installQuiltSpecific(mcVersion, specificVersion, baseDir,
                             msg -> Platform.runLater(() -> log(msg)), runtime);
                 }
                 Platform.runLater(() -> {
@@ -1740,6 +1753,9 @@ public class LauncherApp extends Application {
                     } else if (loader.equalsIgnoreCase("fabric")) {
                         ModloaderInstallerService.installFabric(mcVer, baseDir,
                             s -> Platform.runLater(() -> log("[AUTO-FABRIC] " + s)), runtime);
+                    } else if (loader.equalsIgnoreCase("quilt")) {
+                        ModloaderInstallerService.installQuilt(mcVer, baseDir,
+                            s -> Platform.runLater(() -> log("[AUTO-QUILT] " + s)), runtime);
                     }
 
                     // Recargar manifiesto para encontrar el nuevo ID
@@ -2326,12 +2342,13 @@ public class LauncherApp extends Application {
             String loader = selected.modLoader != null ? selected.modLoader : "vanilla";
             String icon = switch (loader.toLowerCase()) {
                 case "fabric"   -> "🪡 Fabric";
+                case "quilt"    -> "🧵 Quilt";
                 case "forge"    -> "⚙ Forge";
                 case "neoforge" -> "🔥 NeoForge";
                 default         -> "📦 Vanilla";
             };
             boolean canInstallPerfMods = PerformanceModsService.isSupported(loader);
-            String perfNote = canInstallPerfMods ? " ✓ Compatible con mods de rendimiento" : " ✗ Sin soporte de mods (instala Fabric/Forge/NeoForge)";
+            String perfNote = canInstallPerfMods ? " ✓ Compatible con mods de rendimiento" : " ✗ Sin soporte de mods (instala Fabric/Quilt/Forge/NeoForge)";
             modLoaderBadgeLabel.setText("Modloader activo: " + icon + perfNote);
             modLoaderBadgeLabel.setStyle(
                 "-fx-font-size: 12px; -fx-padding: 4 10; -fx-background-radius: 4; -fx-text-fill: " +

@@ -14,11 +14,13 @@ import java.util.List;
 
 /**
  * Consulta las APIs oficiales para listar TODAS las versiones disponibles
- * de Forge, Fabric y NeoForge para una versión de Minecraft dada.
+ * de Forge, Fabric, NeoForge y Quilt para una versión de Minecraft dada.
  */
 public final class ModloaderVersionService {
 
     private static final ObjectMapper M = new ObjectMapper();
+
+    private static final java.util.Map<String, List<String>> CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
     private ModloaderVersionService() {}
 
@@ -28,6 +30,9 @@ public final class ModloaderVersionService {
      * Ejemplo: getForgeVersions("1.20.1") → ["47.4.20", "47.4.19", ..., "47.0.1"]
      */
     public static List<String> getForgeVersions(String mcVersion) throws Exception {
+        String cacheKey = "forge:" + mcVersion;
+        if (CACHE.containsKey(cacheKey)) return CACHE.get(cacheKey);
+
         byte[] bytes = HttpFiles.getBytes(
             "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml");
         Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
@@ -43,6 +48,7 @@ public final class ModloaderVersionService {
             }
         }
         Collections.reverse(versions);
+        CACHE.put(cacheKey, versions);
         return versions;
     }
 
@@ -51,6 +57,9 @@ public final class ModloaderVersionService {
      * Ya viene más reciente primero desde la API de FabricMC.
      */
     public static List<String> getFabricLoaderVersions(String mcVersion) throws Exception {
+        String cacheKey = "fabric:" + mcVersion;
+        if (CACHE.containsKey(cacheKey)) return CACHE.get(cacheKey);
+
         byte[] bytes = HttpFiles.getBytes(
             "https://meta.fabricmc.net/v2/versions/loader/" + mcVersion);
         JsonNode arr = M.readTree(bytes);
@@ -61,11 +70,12 @@ public final class ModloaderVersionService {
                 versions.add(ver);
             }
         }
+        CACHE.put(cacheKey, versions);
         return versions;
     }
 
     /**
-     * Verifica si Fabric Loader soporta la versi\u00f3n de Minecraft dada.
+     * Verifica si Fabric Loader soporta la versión de Minecraft dada.
      * Fabric solo funciona desde Minecraft 1.14 en adelante.
      */
     public static boolean isFabricSupported(String mcVersion) {
@@ -86,6 +96,9 @@ public final class ModloaderVersionService {
      * MC "1.21.1" → busca versiones que empiecen con "21.1.", más reciente primero.
      */
     public static List<String> getNeoForgeVersions(String mcVersion) throws Exception {
+        String cacheKey = "neoforge:" + mcVersion;
+        if (CACHE.containsKey(cacheKey)) return CACHE.get(cacheKey);
+
         byte[] bytes = HttpFiles.getBytes(
             "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml");
         Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
@@ -103,7 +116,48 @@ public final class ModloaderVersionService {
             }
         }
         Collections.reverse(versions);
+        CACHE.put(cacheKey, versions);
         return versions;
+    }
+
+    /**
+     * Lista todas las versiones del Quilt Loader compatibles con la MC version dada.
+     * Quilt soporta Minecraft 1.14+ y es compatible con la mayoría de mods Fabric.
+     * Devuelve las versiones más recientes primero.
+     */
+    public static List<String> getQuiltLoaderVersions(String mcVersion) throws Exception {
+        String cacheKey = "quilt:" + mcVersion;
+        if (CACHE.containsKey(cacheKey)) return CACHE.get(cacheKey);
+
+        byte[] bytes = HttpFiles.getBytes(
+            "https://meta.quiltmc.org/v3/versions/loader/" + mcVersion);
+        JsonNode arr = M.readTree(bytes);
+        List<String> versions = new ArrayList<>();
+        for (JsonNode entry : arr) {
+            String ver = entry.path("loader").path("version").asText(null);
+            if (ver != null && !ver.isBlank()) {
+                versions.add(ver);
+            }
+        }
+        CACHE.put(cacheKey, versions);
+        return versions;
+    }
+
+    /**
+     * Verifica si Quilt Loader soporta la versión de Minecraft dada.
+     * Quilt funciona desde Minecraft 1.14 en adelante (igual que Fabric).
+     */
+    public static boolean isQuiltSupported(String mcVersion) {
+        if (mcVersion == null || mcVersion.isBlank()) return false;
+        try {
+            String clean = mcVersion.split("-")[0];
+            String[] parts = clean.split("\\.");
+            int major = Integer.parseInt(parts[0]);
+            int minor = Integer.parseInt(parts[1]);
+            return major >= 2 || (major == 1 && minor >= 14);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

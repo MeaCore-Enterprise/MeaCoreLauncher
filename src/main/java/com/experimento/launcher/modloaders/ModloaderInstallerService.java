@@ -192,7 +192,6 @@ public class ModloaderInstallerService {
         String javaExe = resolveJavaExecutable(runtime, requiredJava);
         String loaderInfo = (loaderVersion != null && !loaderVersion.isBlank()) ? loaderVersion : "latest";
         logger.accept("[Fabric] Instalando Fabric Loader " + loaderInfo + " para Minecraft " + mcVersion + "...");
-        // Construir comando: si hay loaderVersion específica, añadir -loader
         java.util.List<String> cmd = new java.util.ArrayList<>(java.util.List.of(
                 javaExe, "-jar", tempInstaller.toAbsolutePath().toString(),
                 "client", "-mcversion", mcVersion,
@@ -213,6 +212,69 @@ public class ModloaderInstallerService {
         if (exitCode != 0)
             throw new Exception("Fabric " + loaderInfo + " falló. Instala primero la versión vanilla.");
         logger.accept("[Fabric] ✅ Fabric Loader " + loaderInfo + " instalado correctamente.");
+    }
+
+    /**
+     * Instala la última versión del Quilt Loader para la MC version dada.
+     * Quilt es compatible con la mayoría de mods de Fabric.
+     */
+    public static void installQuilt(String mcVersion, Path launcherDir, Consumer<String> logger) throws Exception {
+        installQuilt(mcVersion, launcherDir, logger, null);
+    }
+
+    public static void installQuilt(String mcVersion, Path launcherDir,
+            Consumer<String> logger, JavaRuntimeService runtime) throws Exception {
+        installQuiltSpecific(mcVersion, null, launcherDir, logger, runtime);
+    }
+
+    /**
+     * Instala una versión ESPECÍFICA del Quilt Loader.
+     * loaderVersion: ej "0.27.1" — si es null usa la última disponible.
+     */
+    public static void installQuiltSpecific(String mcVersion, String loaderVersion,
+            Path launcherDir, Consumer<String> logger, JavaRuntimeService runtime) throws Exception {
+        logger.accept("[Quilt] Descargando instalador universal de Quilt...");
+        // Quilt ofrece un instalador JAR universal compatible con Java 17+
+        String installerUrl = "https://quiltmc.org/api/v1/download-latest-installer/java-universal";
+        Path tempInstaller = Files.createTempFile("quilt-installer-", ".jar");
+        HttpFiles.downloadIfHashMismatch(installerUrl, tempInstaller, null);
+
+        int requiredJava = Math.max(resolveJavaVersionForMinecraft(mcVersion), 17); // Quilt requiere Java 17+
+        String javaExe = resolveJavaExecutable(runtime, requiredJava);
+
+        String loaderInfo = (loaderVersion != null && !loaderVersion.isBlank()) ? loaderVersion : "latest";
+        logger.accept("[Quilt] Instalando Quilt Loader " + loaderInfo + " para Minecraft " + mcVersion + "...");
+
+        // Comando del instalador Quilt: install client <mcVersion> [<loaderVersion>] --install-dir <dir> --no-profile
+        java.util.List<String> cmd = new java.util.ArrayList<>(java.util.List.of(
+                javaExe, "-jar", tempInstaller.toAbsolutePath().toString(),
+                "install", "client", mcVersion));
+        if (loaderVersion != null && !loaderVersion.isBlank()) {
+            cmd.add(loaderVersion);
+        }
+        cmd.addAll(java.util.List.of(
+                "--install-dir=" + launcherDir.toAbsolutePath().toString(),
+                "--no-profile"));
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        try (Scanner s = new Scanner(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8.name())) {
+            while (s.hasNextLine()) {
+                String line = s.nextLine();
+                if (line.toLowerCase().contains("error") || line.toLowerCase().contains("exception")) {
+                    logger.accept("[Quilt-Error] " + line);
+                } else if (!line.isBlank()) {
+                    logger.accept("[Quilt-Bot] " + line);
+                }
+            }
+        }
+        int exitCode = p.waitFor();
+        Files.deleteIfExists(tempInstaller);
+        if (exitCode != 0)
+            throw new Exception("Quilt " + loaderInfo + " falló (código " + exitCode
+                    + "). Instala primero la versión vanilla.");
+        logger.accept("[Quilt] ✅ Quilt Loader " + loaderInfo + " instalado. Compatible con mods de Fabric.");
     }
 
     private static String resolveLatestFabricInstaller(Consumer<String> logger) {

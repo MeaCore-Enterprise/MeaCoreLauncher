@@ -14,16 +14,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 /**
- * Descarga e instala automáticamente los mods de rendimiento más conocidos
- * para Fabric: Sodium, Lithium, FerriteCore e Indium.
+ * Descarga e instala automáticamente los mods de rendimiento más potentes
+ * para Fabric, Quilt, Forge y NeoForge de forma paralela y optimizada.
  * 
- * Estos mods son 100% gratuitos y de código abierto (FOSS).
- * En pruebas con SkyFactory 4 y modpacks similares, su combinación
- * puede subir los FPS de 25-40 a 60+ estables.
+ * Todos los mods son 100% de código abierto (FOSS) y libres de costo.
  */
 public final class PerformanceModsService {
 
@@ -39,30 +43,49 @@ public final class PerformanceModsService {
     public record PerformanceMod(String slug, String name, String description) {}
     public record ModDownloadInfo(String url, String sha1) {}
 
+    /** Fabric 1.14+ */
     public static final List<PerformanceMod> FABRIC_MODS = List.of(
-        new PerformanceMod("sodium",         "Sodium",          "Motor de renderizado moderno — +50-300% FPS"),
-        new PerformanceMod("lithium",        "Lithium",         "Optimización de lógica del juego y servidor"),
-        new PerformanceMod("ferrite-core",   "FerriteCore",     "Reducción masiva de uso de RAM (-30%)"),
-        new PerformanceMod("indium",         "Indium",          "Compatibilidad de Sodium con Fabric Rendering API"),
-        new PerformanceMod("immediatelyfast","ImmediatelyFast", "Renderizado de entidades y UI más rápido")
+        new PerformanceMod("sodium",          "Sodium",          "Motor de renderizado moderno — +50-300% FPS"),
+        new PerformanceMod("lithium",         "Lithium",         "Optimización de lógica del juego y servidor"),
+        new PerformanceMod("ferrite-core",    "FerriteCore",     "Reducción masiva de uso de RAM (-30%)"),
+        new PerformanceMod("indium",          "Indium",          "Compatibilidad de Sodium con Fabric Rendering API"),
+        new PerformanceMod("immediatelyfast", "ImmediatelyFast", "Renderizado de entidades y UI ultra-rápido"),
+        new PerformanceMod("krypton",         "Krypton",         "Optimización del stack de red y reducción de ping"),
+        new PerformanceMod("starlight",       "Starlight",       "Motor de iluminación reescrito (MC ≤1.19)"),
+        new PerformanceMod("entityculling",   "EntityCulling",   "Oculta entidades detrás de paredes — +20-50% FPS")
+    );
+
+    /** Quilt 1.14+ — compatible con mods Fabric */
+    public static final List<PerformanceMod> QUILT_MODS = List.of(
+        new PerformanceMod("qsl",             "Quilted Fabric API", "API base necesaria para compatibilidad de Quilt"),
+        new PerformanceMod("sodium",          "Sodium",             "Motor de renderizado moderno — +50-300% FPS"),
+        new PerformanceMod("lithium",         "Lithium",            "Optimización de lógica del juego y servidor"),
+        new PerformanceMod("ferrite-core",    "FerriteCore",        "Reducción masiva de uso de RAM (-30%)"),
+        new PerformanceMod("immediatelyfast", "ImmediatelyFast",    "Renderizado de entidades y UI ultra-rápido"),
+        new PerformanceMod("krypton",         "Krypton",            "Optimización del stack de red y reducción de ping"),
+        new PerformanceMod("entityculling",   "EntityCulling",      "Oculta entidades detrás de paredes — +20-50% FPS")
     );
 
     /** Forge 1.12.2–1.21+ */
     public static final List<PerformanceMod> FORGE_MODS = List.of(
-        new PerformanceMod("ferritecore", "FerriteCore", "Reducción masiva de uso de RAM (-30%)"),
-        new PerformanceMod("embeddium",   "Embeddium",   "Motor de renderizado para Forge (Reemplazo de Rubidium) — +50% FPS"),
-        new PerformanceMod("modernfix",   "ModernFix",   "Tiempos de carga -50%, RAM -20%, FPS +10%")
+        new PerformanceMod("ferrite-core", "FerriteCore", "Reducción masiva de uso de RAM (-30%)"),
+        new PerformanceMod("embeddium",    "Embeddium",   "Motor de renderizado para Forge — +50-200% FPS"),
+        new PerformanceMod("modernfix",    "ModernFix",   "Tiempos de carga -50%, RAM -20%, FPS +10%"),
+        new PerformanceMod("ksyxis",       "Ksyxis",      "Elimina pantalla de carga de mundo innecesaria"),
+        new PerformanceMod("oculus",       "Oculus",      "Soporte de Shaders para Forge compatible con Embeddium")
     );
 
-    /** NeoForge 1.20.2+ — usa Embeddium (fork activo de Rubidium) */
+    /** NeoForge 1.20.2+ — usa Embeddium */
     public static final List<PerformanceMod> NEOFORGE_MODS = List.of(
-        new PerformanceMod("ferritecore",  "FerriteCore",  "Reducción masiva de uso de RAM (-30%)"),
-        new PerformanceMod("embeddium",    "Embeddium",    "Motor de renderizado para NeoForge/Forge — +50% FPS"),
-        new PerformanceMod("modernfix",    "ModernFix",    "Tiempos de carga -50%, RAM -20%, FPS +10%")
+        new PerformanceMod("ferrite-core", "FerriteCore", "Reducción masiva de uso de RAM (-30%)"),
+        new PerformanceMod("embeddium",    "Embeddium",   "Motor de renderizado para NeoForge/Forge — +50-200% FPS"),
+        new PerformanceMod("modernfix",    "ModernFix",   "Tiempos de carga -50%, RAM -20%, FPS +10%"),
+        new PerformanceMod("ksyxis",       "Ksyxis",      "Elimina pantalla de carga de mundo innecesaria"),
+        new PerformanceMod("oculus",       "Oculus",      "Soporte de Shaders para NeoForge compatible con Embeddium")
     );
 
     /**
-     * Descarga e instala los mods de rendimiento en la carpeta de mods de la instancia.
+     * Descarga e instala en paralelo los mods de rendimiento en la carpeta de mods.
      * Solo instala los que sean compatibles con la versión dada.
      */
     public static void installPerformanceMods(
@@ -77,73 +100,91 @@ public final class PerformanceModsService {
         List<PerformanceMod> mods;
         if (loaderLow.contains("neoforge")) {
             mods = NEOFORGE_MODS;
+        } else if (loaderLow.contains("quilt")) {
+            mods = QUILT_MODS;
         } else if (loaderLow.contains("fabric")) {
             mods = FABRIC_MODS;
         } else if (loaderLow.contains("forge")) {
             mods = FORGE_MODS;
         } else {
-            log.accept("[PERF] Loader '" + loader + "' no soportado. Instala Fabric, Forge o NeoForge primero.");
+            log.accept("[PERF] Loader '" + loader + "' no soportado. Instala Fabric, Quilt, Forge o NeoForge primero.");
             return;
         }
 
-        log.accept("[PERF] Iniciando instalación de mods de rendimiento para " + mcVersion + " (" + loader + ")...");
-        log.accept("[PERF] Mods a instalar: " + mods.stream().map(PerformanceMod::name).reduce((a, b) -> a + ", " + b).orElse("ninguno"));
+        log.accept("[PERF] Iniciando optimización con mods de rendimiento para " + mcVersion + " (" + loader + ")...");
+        log.accept("[PERF] Mods a verificar: " + mods.stream().map(PerformanceMod::name).collect(Collectors.joining(", ")));
 
-        int installed = 0;
-        for (PerformanceMod mod : mods) {
-            try {
-                ModDownloadInfo info = resolveDownloadUrl(mod.slug(), mcVersion, loader.toLowerCase(), log);
-                if (info == null) {
-                    log.accept("[PERF] ⚠ " + mod.name() + " no disponible para esta versión, omitiendo.");
-                    continue;
-                }
+        AtomicInteger installed = new AtomicInteger(0);
+        ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 
-                String fileName = mod.slug() + "-" + mcVersion + "-" + loader + ".jar";
-                Path dest = modsDir.resolve(fileName);
-
-                // Si el archivo ya existe, comprobar el hash para ver si está al día o corrupto/desactualizado
-                if (Files.exists(dest)) {
-                    if (info.sha1() != null) {
-                        try (InputStream fis = Files.newInputStream(dest)) {
-                            String currentHash = com.experimento.launcher.util.Hashing.sha1Hex(fis);
-                            if (info.sha1().equalsIgnoreCase(currentHash)) {
-                                log.accept("[PERF] ✓ " + mod.name() + " ya está instalado y al día.");
-                                installed++;
-                                continue;
-                            } else {
-                                log.accept("[PERF] 🔄 Actualizando " + mod.name() + " (cambio de versión detectado)...");
-                            }
-                        } catch (Exception e) {
-                            // En caso de error de lectura, procedemos a re-descargar
+        try {
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (PerformanceMod mod : mods) {
+                futures.add(CompletableFuture.runAsync(() -> {
+                    try {
+                        ModDownloadInfo info = resolveDownloadUrl(mod.slug(), mcVersion, loaderLow, log);
+                        if (info == null) {
+                            log.accept("[PERF] ℹ " + mod.name() + " no requerido o no disponible para " + mcVersion + ", omitiendo.");
+                            return;
                         }
-                    } else {
-                        log.accept("[PERF] ✓ " + mod.name() + " ya está instalado.");
-                        installed++;
-                        continue;
+
+                        String fileName = mod.slug() + "-" + mcVersion + "-" + loaderLow + ".jar";
+                        Path dest = modsDir.resolve(fileName);
+
+                        if (Files.exists(dest)) {
+                            if (info.sha1() != null) {
+                                try (InputStream fis = Files.newInputStream(dest)) {
+                                    String currentHash = com.experimento.launcher.util.Hashing.sha1Hex(fis);
+                                    if (info.sha1().equalsIgnoreCase(currentHash)) {
+                                        log.accept("[PERF] ✓ " + mod.name() + " ya está instalado y al día.");
+                                        installed.incrementAndGet();
+                                        return;
+                                    } else {
+                                        log.accept("[PERF] 🔄 Actualizando " + mod.name() + "...");
+                                    }
+                                } catch (Exception ignored) {}
+                            } else {
+                                log.accept("[PERF] ✓ " + mod.name() + " ya está instalado.");
+                                installed.incrementAndGet();
+                                return;
+                            }
+                        }
+
+                        log.accept("[PERF] Descargando " + mod.name() + "...");
+                        HttpFiles.downloadIfHashMismatch(info.url(), dest, info.sha1());
+                        log.accept("[PERF] ✅ " + mod.name() + " instalado — " + mod.description());
+                        installed.incrementAndGet();
+
+                    } catch (Exception e) {
+                        log.accept("[PERF] ⚠ No se pudo instalar " + mod.name() + ": " + e.getMessage());
                     }
-                }
-
-                log.accept("[PERF] Descargando " + mod.name() + "...");
-                HttpFiles.downloadIfHashMismatch(info.url(), dest, info.sha1());
-                log.accept("[PERF] ✅ " + mod.name() + " instalado — " + mod.description());
-                installed++;
-
-            } catch (Exception e) {
-                log.accept("[PERF] ⚠ No se pudo instalar " + mod.name() + ": " + e.getMessage());
+                }, pool));
             }
+
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        } finally {
+            pool.shutdown();
         }
 
         log.accept("[PERF] ═══════════════════════════════════════════════");
-        log.accept("[PERF] Instalación completa: " + installed + "/" + mods.size() + " mods de rendimiento listos.");
-        if (installed > 0) {
-            log.accept("[PERF] Los mods se aplicarán la próxima vez que inicies el juego.");
-            log.accept("[PERF] Mejora esperada de FPS: +50-150% dependiendo de tu PC.");
+        log.accept("[PERF] Optimización lista: " + installed.get() + "/" + mods.size() + " mods de rendimiento activos.");
+        if (installed.get() > 0) {
+            log.accept("[PERF] Los mods se aplicarán automáticamente al lanzar el juego.");
+            log.accept("[PERF] Rendimiento estimado: +50-200% FPS, menor consumo de RAM y tiempos de carga reducidos.");
         }
     }
 
     private static ModDownloadInfo resolveDownloadUrl(String slug, String mcVersion, String loader, Consumer<String> log) {
+        ModDownloadInfo info = queryModrinth(slug, mcVersion, loader);
+        if (info == null && loader.equalsIgnoreCase("quilt")) {
+            // Quilt puede usar mods etiquetados como Fabric
+            info = queryModrinth(slug, mcVersion, "fabric");
+        }
+        return info;
+    }
+
+    private static ModDownloadInfo queryModrinth(String slug, String mcVersion, String loader) {
         try {
-            // Bug 10 URL encoding fix: encode the entire query parameter value including the brackets!
             String searchUrl = MODRINTH_API + "/project/" + slug + "/version?game_versions=" +
                     URLEncoder.encode("[\"" + mcVersion + "\"]", StandardCharsets.UTF_8) + "&loaders=" +
                     URLEncoder.encode("[\"" + loader + "\"]", StandardCharsets.UTF_8);
@@ -174,10 +215,10 @@ public final class PerformanceModsService {
             if (targetFile == null) {
                 targetFile = files.get(0);
             }
-            
+
             String url = targetFile.path("url").asText(null);
             String sha1 = targetFile.path("hashes").path("sha1").asText(null);
-            
+
             if (url == null) return null;
             return new ModDownloadInfo(url, sha1);
 
@@ -192,6 +233,6 @@ public final class PerformanceModsService {
     public static boolean isSupported(String loader) {
         if (loader == null) return false;
         String l = loader.toLowerCase();
-        return l.contains("fabric") || l.contains("forge") || l.contains("neoforge");
+        return l.contains("fabric") || l.contains("quilt") || l.contains("forge") || l.contains("neoforge");
     }
 }

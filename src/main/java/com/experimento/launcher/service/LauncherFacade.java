@@ -266,8 +266,18 @@ public final class LauncherFacade {
                 Path portable = runtimeService.getExecutable(requiredVer);
                 if (portable != null) {
                     effectiveJava = portable.toAbsolutePath().toString();
-                } else if (requiredVer == 21) {
-                    // Fallback a Java 17 si no hay Java 21 portátil (algunas versiones 1.20 funcionan con 17)
+                } else {
+                    System.out.println("[LAUNCHER] Descargando Java " + requiredVer + " requerido (puede tardar un momento)...");
+                    try {
+                        portable = runtimeService.downloadJavaSync(requiredVer, pct -> {});
+                        if (portable != null) effectiveJava = portable.toAbsolutePath().toString();
+                    } catch (Exception e) {
+                        System.err.println("[LAUNCHER] Falló la descarga automática de Java: " + e.getMessage());
+                    }
+                }
+                
+                // Fallback a Java 17 solo si se solicitaba 21 y la descarga falló
+                if (effectiveJava == null && requiredVer == 21) {
                     portable = runtimeService.getExecutable(17);
                     if (portable != null) effectiveJava = portable.toAbsolutePath().toString();
                 }

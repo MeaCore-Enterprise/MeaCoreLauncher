@@ -21,6 +21,8 @@ public final class HttpFiles {
 
     private static final HttpClient HTTP =
             HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_2)
+                    .executor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor())
                     .followRedirects(HttpClient.Redirect.ALWAYS)
                     .connectTimeout(Duration.ofSeconds(30))
                     .build();

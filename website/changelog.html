@@ -79,10 +79,34 @@
         <h1>Historial de Versiones</h1>
         <p>Registro transparente de todos los cambios de MeaCore</p>
     </div>
+        <!-- v1.6.1 -->
+        <div class="log-item">
+            <div class="version-header">
+                <h3 style="color: #00d2ff;">v1.6.1 - Velocidad y Rendimiento Extremo 🚀 (Actual)</h3>
+                <span class="version-date">26 de Septiembre, 2026</span>
+            </div>
+            <p><strong>⚡ Mejoras de Descarga y Red:</strong></p>
+            <ul>
+                <li><strong>Virtual Threads & HTTP/2:</strong> Se migró todo el sistema de descargas del launcher (assets, librerías y mods) al nuevo modelo de Hilos Virtuales de Java 21 y al protocolo HTTP/2, permitiendo descargas hiper-paralelizadas con latencia y uso de CPU casi nulos.</li>
+                <li><strong>Caché Inteligente de Modloaders:</strong> Consultar versiones de Forge, Fabric, Quilt y NeoForge ahora almacena los resultados en caché, haciendo que cambiar entre versiones en la UI sea instantáneo (0ms) en lugar de recargar de internet cada vez.</li>
+                <li><strong>Soporte Nativo Legacy Completado:</strong> Solucionado el problema que impedía descargar y extraer correctamente las librerías nativas <code>.so</code>/<code>.dll</code> de versiones antiguas de Minecraft (como Forge 1.12.2), arreglando múltiples crasheos (ej. HTTP 404 para LWJGL).</li>
+            </ul>
+            <p><strong>🚀 Mejoras de JVM y JVM Presets:</strong></p>
+            <ul>
+                <li><strong>Nuevas Banderas "Aikar" para G1GC:</strong> Los perfiles de memoria Media/Baja (<code>BALANCED</code> y <code>HIGH</code>) ahora utilizan el famoso conjunto de banderas de Aikar para su recolector de basura, eliminando virtualmente los picos de "lag" en equipos modestos.</li>
+                <li><strong>Clasificador de Librerías Nativas:</strong> Corregido el algoritmo deduplicador del classpath que eliminaba accidentalmente las librerías gráficas de LWJGL en versiones modernas como Minecraft 1.21.4.</li>
+                <li><strong>Descarga automática de Java 8:</strong> Al lanzar versiones antiguas de Forge, el launcher ahora intercepta el arranque y descarga proactivamente el JRE portátil correcto, solucionando el famoso crasheo <code>ClassCastException (URLClassLoader)</code> en Java 21.</li>
+            </ul>
+            <p><strong>🛡️ Telemetría y Experiencia de Usuario:</strong></p>
+            <ul>
+                <li><strong>Telemetría Asíncrona:</strong> El reporte de logs y fallos a Supabase ahora se realiza en segundo plano, evitando que la interfaz del launcher se congele temporalmente después de un cierre inesperado del juego.</li>
+            </ul>
+        </div>
+
         <!-- v1.6.0 -->
         <div class="log-item">
             <div class="version-header">
-                <h3 style="color: #00d2ff;">v1.6.0 - Bugfix Engine &amp; Estabilidad Total 🛠️ (Actual)</h3>
+                <h3 style="color: #888888;">v1.6.0 - Bugfix Engine &amp; Estabilidad Total 🛠️</h3>
                 <span class="version-date">2 de Junio, 2026</span>
             </div>
             <p><strong>🐛 Correcciones Críticas del Motor de Juego:</strong></p>

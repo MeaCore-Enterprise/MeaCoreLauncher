@@ -200,6 +200,9 @@ public final class GameLauncher {
 
     private List<Path> buildClasspath(JsonNode merged, Path clientJar) throws Exception {
         List<Path> cp = new ArrayList<>();
+        java.util.Map<String, Path> artifacts = new java.util.LinkedHashMap<>();
+        java.util.Map<String, String> artifactVersions = new java.util.HashMap<>();
+
         if (merged.has("libraries")) {
             for (JsonNode lib : merged.get("libraries")) {
                 if (!RuleEvaluator.libraryAllowed(lib, os)) {
@@ -216,16 +219,31 @@ public final class GameLauncher {
                     libPath = librariesDir.resolve(nameToPath(lib.get("name").asText()));
                 }
 
-                if (libPath != null) {
-                    // Solo añadir al classpath si el archivo realmente existe en disco
-                    // NOTA: text2speech SÍ debe estar en el classpath — Minecraft 1.12.2 referencia
-                    // com.mojang.text2speech.Narrator estáticamente y sin el JAR la JVM crashea.
-                    if (Files.exists(libPath)) {
+                if (libPath != null && Files.exists(libPath)) {
+                    if (lib.has("name")) {
+                        String name = lib.get("name").asText();
+                        String[] parts = name.split(":");
+                        if (parts.length >= 3) {
+                            String classifier = parts.length > 3 ? ":" + parts[3] : "";
+                            String ga = parts[0] + ":" + parts[1] + classifier;
+                            String version = parts[2];
+                            
+                            String currentVersion = artifactVersions.get(ga);
+                            // Conservar la versión más alta para evitar clases duplicadas (ej. org.ow2.asm:asm)
+                            if (currentVersion == null || com.experimento.launcher.util.VersionComparator.compare(version, currentVersion) > 0) {
+                                artifactVersions.put(ga, version);
+                                artifacts.put(ga, libPath);
+                            }
+                            continue;
+                        }
+                    }
+                    if (!cp.contains(libPath)) {
                         cp.add(libPath);
                     }
                 }
             }
         }
+        cp.addAll(artifacts.values());
         cp.add(clientJar);
         return cp;
     }
