@@ -280,30 +280,25 @@ public final class AutoUpdateService {
             } else {
                 // Linux: detect package manager and elevation tool, then install & relaunch
                 String currentExe = ProcessHandle.current().info().command().orElse("/opt/meacore-launcher/bin/MeaCore Launcher");
-                String pmCmd, elevate;
+                String pmCmd;
                 if (Files.exists(Path.of("/usr/bin/apt"))) {
                     pmCmd = "apt install";
-                    elevate = "sudo";
                 } else if (Files.exists(Path.of("/usr/bin/dnf"))) {
                     pmCmd = "dnf install";
-                    elevate = "sudo";
                 } else {
                     pmCmd = "dpkg -i";
-                    elevate = "sudo";
                 }
+
+                // pkexec muestra un diálogo gráfico de PolicyKit y no necesita TTY ni
+                // contraseña en sudoers → funciona desde el launcher sin consola.
+                // Fallback a sudo para sistemas sin PolicyKit.
+                String elevate = Files.exists(Path.of("/usr/bin/pkexec")) ? "pkexec" : "sudo";
+
                 boolean useY = !pmCmd.equals("dpkg -i");
-                String cmd;
-                if (useY) {
-                    cmd = String.format(
-                            "sleep 2 && %s %s -y \"%s\" 2>&1 && " +
-                            "(nohup \"" + currentExe + "\" > /dev/null 2>&1 &)",
-                            elevate, pmCmd, absPath);
-                } else {
-                    cmd = String.format(
-                            "sleep 2 && %s %s \"%s\" 2>&1 && " +
-                            "(nohup \"" + currentExe + "\" > /dev/null 2>&1 &)",
-                            elevate, pmCmd, absPath);
-                }
+                String installCmd = String.format(
+                        "sleep 2 && %s %s %s\"%s\" 2>&1",
+                        elevate, pmCmd, useY ? "-y " : "", absPath);
+                String cmd = installCmd + " && (nohup \"" + currentExe + "\" > /dev/null 2>&1 &)";
                 new ProcessBuilder("bash", "-c", cmd).start();
             }
 
@@ -313,8 +308,11 @@ public final class AutoUpdateService {
             System.exit(0);
 
         } catch (Exception e) {
-            Platform.exit();
-            System.exit(0);
+            // No cerramos el launcher si la elevación/instalación falló:
+            // el usuario necesita feedback y poder reintentar.
+            if (listener != null) {
+                listener.onDownloadError("No se pudo lanzar la instalación: " + e.getMessage());
+            }
         }
     }
 
