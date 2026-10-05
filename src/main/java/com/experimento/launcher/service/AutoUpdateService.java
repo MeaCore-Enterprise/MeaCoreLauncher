@@ -2,6 +2,8 @@ package com.experimento.launcher.service;
 
 import com.experimento.launcher.LauncherMetadata;
 import com.experimento.launcher.mojang.HttpFiles;
+import com.experimento.launcher.util.Hashing;
+import com.experimento.launcher.util.SemVer;
 import javafx.application.Platform;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,12 +33,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *  8. Bat se autolimpia con "del %~f0" al terminar.
  *  9. Mensajes de error humanizados — sin rutas técnicas crudas al usuario.
  * 10. Timeout explícito en el HttpRequest al GitHub API.
- * 11. Unblock-File lanzado antes de notificar al listener — ya está listo cuando el usuario clica.
+ *
+ * Mejoras v2.1 (arreglo del loop de auto-actualización):
+ * 12. La decisión de "hay actualización" la toma {@link SemVer}, que normaliza AMBOS
+ *     lados (tag "v1.6.1" y version.properties "1.6.1") antes de comparar. Antes se comparaba
+ *     el tag crudo contra el valor crudo de version.properties, que nunca lleva prefijo, así que
+ *     la comparación era siempre distinta y el launcher se re-detectaba a sí mismo en loop.
+ * 13. Se eliminó la rama espuria de "pre-release → estable" que comparaba strings crudos; la
+ *     promoción de pre-release a estable se resuelve por canal dentro de SemVer.
+ * 14. {@link UpdateState} persiste las versiones ya instaladas o descartadas: no se vuelve a
+ *     ofrecer la misma versión aunque el instalador haya fallado en silencio.
+ * 15. El cooldown se aplica también cuando el check falla, y el check manual del botón salta
+ *     el cooldown (antes se quedaba en "Buscando..." para siempre).
  */
 public final class AutoUpdateService {
 
     private static final String GITHUB_API_LATEST =
             "https://api.github.com/repos/MeaCore-Enterprise/MeaCoreLauncher/releases/latest";
+
+    /**
+     * Respaldo cuando GitHub limita las peticiones. El Worker guarda la release en la caché
+     * del edge, así que responde aunque la API de GitHub esté devolviendo 403. Trae los mismos
+     * campos (digest y size incluidos) para que la verificación siga siendo posible.
+     */
+    private static final String MIRROR_API_LATEST =
+            "https://meacorelauncher.meacore-enterprise.workers.dev/api/latest-release";
 
     private static final ObjectMapper M = new ObjectMapper();
 
@@ -48,16 +69,52 @@ public final class AutoUpdateService {
     private static final AtomicBoolean downloading = new AtomicBoolean(false);
     private static final AtomicBoolean installing  = new AtomicBoolean(false);
 
-    // Rate limiting: no chequear GitHub más de una vez por hora
-    private static volatile Instant lastCheck    = Instant.EPOCH;
-    private static final Duration   CHECK_COOLDOWN = Duration.ofHours(1);
+    // Versión ofrecida/descargada esperando a que el usuario instale (null si no hay nada pendiente)
+    private static volatile String pendingVersion;
+    // Integridad del asset anunciado por la API: digest "sha256:..." y tamaño en bytes.
+    private static volatile String pendingDigest;
+    private static volatile Long   pendingSize;
 
+    // Rate limiting: no chequear GitHub más de una vez por hora. El valor se persiste en
+    // update-state.json para que reiniciar el launcher no gaste una petición de GitHub cada vez.
+    private static final Duration CHECK_COOLDOWN = Duration.ofHours(1);
+
+    /**
+     * Eventos del ciclo de actualización. Los errores de COMPROBACIÓN ({@link #onCheckError})
+     * van separados de los de DESCARGA/INSTALACIÓN ({@link #onDownloadError}) porque su
+     * recuperación en la UI es distinta: un fallo de check nunca debe inutilizar el botón de
+     * actualización.
+     */
     public interface UpdateListener {
         void onUpdateFound(String version, String url);
         void onDownloadProgress(double fraction);
         /** Descarga completada. El listener decide si llamar installFromPath(). */
         void onDownloadComplete(Path installerPath);
+        /** Fallo al descargar o instalar. */
         void onDownloadError(String message);
+
+        /**
+         * La descarga terminó íntegra pero SIN hash válido para verificarla (la API no lo
+         * publica, o el digest no coincide con lo anunciado). El archivo queda en disco y la
+         * UI debe ofrecer la descarga manual en el navegador en lugar de instalar.
+         */
+        default void onUnverifiedDownload(Path installerPath) {}
+
+        /** Fallo al COMPROBAR si hay actualizaciones (red, API, rate limit). */
+        default void onCheckError(String message) {}
+
+        /** Ya estás en la última versión: no hay nada que ofrecer. */
+        default void onUpToDate() {}
+
+        /** Se saltó la comprobación por el rate limiting de 1 hora (solo check automático). */
+        default void onCooldownSkipped() {}
+
+        /**
+         * Se emite siempre al terminar una comprobación, por cualquier camino.
+         * Es la red de seguridad que garantiza que el botón "Buscar Actualizaciones"
+         * vuelva a su estado y deje de estar deshabilitado.
+         */
+        default void onCheckFinished() {}
     }
 
     public static void setListener(UpdateListener l) {
@@ -69,15 +126,28 @@ public final class AutoUpdateService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Consulta GitHub Releases en segundo plano.
-     * - No lanza un segundo hilo si ya hay uno corriendo (guard atómico).
-     * - No consulta si el último check fue hace menos de 1 hora (rate limiting).
+     * Comprobación automática en segundo plano: respeta el rate limiting de 1 hora.
      */
     public static void checkForUpdatesAsync() {
-        if (!checking.compareAndSet(false, true)) return;
+        checkForUpdatesAsync(false);
+    }
 
-        if (Duration.between(lastCheck, Instant.now()).compareTo(CHECK_COOLDOWN) < 0) {
+    /**
+     * @param force true para saltar el rate limiting (botón "Buscar Actualizaciones").
+     *              Los guards atómicos aplican igual: nunca hay dos checks a la vez.
+     */
+    public static void checkForUpdatesAsync(boolean force) {
+        if (!checking.compareAndSet(false, true)) {
+            // Ya hay un check en marcha: su propio onCheckFinished restaurará el botón.
+            return;
+        }
+
+        if (!force && isOnCooldown(updateState().lastCheck().orElse(Instant.EPOCH))) {
             checking.set(false);
+            if (listener != null) {
+                listener.onCooldownSkipped();
+                listener.onCheckFinished();
+            }
             return;
         }
 
@@ -87,60 +157,124 @@ public final class AutoUpdateService {
                         .connectTimeout(Duration.ofSeconds(10))
                         .build();
 
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(GITHUB_API_LATEST))
-                        .header("Accept", "application/vnd.github.v3+json")
-                        .header("User-Agent", "MeaCoreLauncher/" + LauncherMetadata.VERSION)
-                        // Timeout total del request — sin esto usa solo el connectTimeout
-                        .timeout(Duration.ofSeconds(15))
-                        .GET()
-                        .build();
+                FetchResult result = fetchLatestRelease(client, GITHUB_API_LATEST);
 
-                HttpResponse<InputStream> res = client.send(req, HttpResponse.BodyHandlers.ofInputStream());
-                lastCheck = Instant.now();
-                if (res.statusCode() != 200) {
-                    if (listener != null) listener.onDownloadError("GitHub API no disponible (código " + res.statusCode() + "). Intenta más tarde.");
-                    return;
-                }
-
-                JsonNode release = M.readTree(res.body());
-                String tagName       = release.path("tag_name").asText("");
-                String latestRaw     = tagName;
-                String currentRaw    = LauncherMetadata.VERSION;
-                String latestVersion = normalizeVersion(tagName);
-                String currentVersion = normalizeVersion(LauncherMetadata.VERSION);
-
-                if (latestVersion.isBlank()) return;
-                if (latestVersion.equals(currentVersion) && !latestRaw.equals(currentRaw)) {
-                    // remote is a stable release where local is a pre-release — proceed
-                } else if (!isNewer(latestVersion, currentVersion)) {
-                    return;
-                }
-
-                boolean isWindows    = isWindows();
-                String  preferredExt = isWindows ? ".exe" : ".deb";
-                String  downloadUrl  = null;
-
-                for (JsonNode asset : release.path("assets")) {
-                    if (asset.path("name").asText("").endsWith(preferredExt)) {
-                        downloadUrl = asset.path("browser_download_url").asText("");
-                        break;
+                // GitHub limita a 60 peticiones/hora sin token: con el límite alcanzado el
+                // usuario se quedaría sin actualizaciones hasta el siguiente arranque. Se
+                // reintenta contra la copia en caché del Worker antes de rendirse.
+                if (result.status != 200) {
+                    FetchResult mirror = fetchLatestRelease(client, MIRROR_API_LATEST);
+                    if (mirror.status == 200) {
+                        result = mirror;
+                    } else {
+                        if (listener != null) listener.onCheckError(checkErrorMessage(result.status));
+                        return;
                     }
                 }
 
-                if (downloadUrl != null && listener != null) {
-                    final String url = downloadUrl;
-                    listener.onUpdateFound(latestVersion, url);
-                }
+                JsonNode release = result.body;
+
+                evaluateAndNotify(release.path("tag_name").asText(""), release.path("assets"), force);
 
             } catch (Exception e) {
-                if (listener != null) listener.onDownloadError("Error de conexión: " + e.getMessage());
+                if (listener != null) listener.onCheckError(humanizeCheckError(e));
             } finally {
+                // El cooldown aplica también tras un fallo: si GitHub está caído, no se reintenta
+                // en bucle cada vez que se abre el launcher.
+                updateState().markChecked(Instant.now());
                 checking.set(false);
+                if (listener != null) listener.onCheckFinished();
             }
         }, "meacore-update-check");
         t.setDaemon(true);
         t.start();
+    }
+
+/**
+ * Decide si la release remota es una actualización real para esta instalación y notifica
+ * al listener el resultado (o la ausencia de él).
+ *
+ * <p>Regla única: se compara siempre la versión NORMALIZADA de ambos lados
+ * ({@code tag_name} "v1.6.1" → 1.6.1 contra {@code version.properties} 1.6.1). Si no es
+ * estrictamente más nueva, no hay nada que ofrecer — da igual el prefijo del tag, el
+ * sufijo de pre-release, o si local y remota son exactamente la misma versión.
+ *
+     * @param force check manual del usuario: ignora los descartes previos, no las instalaciones.
+     */
+    private static void evaluateAndNotify(String tagName, JsonNode assets, boolean force) {
+        SemVer latest  = SemVer.parse(tagName);
+        SemVer current = SemVer.parse(LauncherMetadata.VERSION);
+
+        // Tag ilegible o versión local desconocida (version.properties ausente):
+        // no se puede afirmar que haya nada nuevo, así que no se molesta al usuario.
+        if (!latest.isValid() || !current.isValid()) return;
+
+        if (!latest.isNewerThan(current)) {
+            if (listener != null) listener.onUpToDate();
+            return;
+        }
+
+        String latestVersion = latest.normalized();
+
+        // Ya instalada: no se re-ofrece nunca (el instalador pudo fallar en silencio).
+        UpdateState state = updateState();
+        if (state.isInstalled(latestVersion)) return;
+        // Descartada con la ✕: no se vuelve a ofrecer en checks automáticos, pero una
+        // búsqueda manual del usuario sí la muestra de nuevo.
+        if (!force && state.isDismissed(latestVersion)) return;
+
+        boolean isWindows    = isWindows();
+        String  preferredExt = isWindows ? ".exe" : ".deb";
+        String  downloadUrl  = null;
+        String  digest       = null;
+        Long    assetSize    = null;
+
+        for (JsonNode asset : assets) {
+            if (asset.path("name").asText("").endsWith(preferredExt)) {
+                downloadUrl = asset.path("browser_download_url").asText("");
+                // GitHub publica "digest": "sha256:...". Si falta, se ofrece la descarga
+                // manual en el navegador en vez de instalar sin verificar.
+                String d = asset.path("digest").asText("");
+                if (d.regionMatches(true, 0, "sha256:", 0, 7)) {
+                    digest = d;
+                }
+                long size = asset.path("size").asLong(0L);
+                if (size > 0) {
+                    assetSize = size;
+                }
+                break;
+            }
+        }
+
+        if (downloadUrl == null || downloadUrl.isBlank()) {
+            if (listener != null) {
+                listener.onDownloadError("Hay una versión nueva (v" + latestVersion
+                        + ") pero no hay instalador disponible para tu sistema.");
+            }
+            return;
+        }
+
+        pendingVersion = latestVersion;
+        pendingDigest  = digest;
+        pendingSize    = assetSize;
+        if (listener != null) listener.onUpdateFound(latestVersion, downloadUrl);
+    }
+
+    /** Versión ofrecida/descargada a la espera de que el usuario instale (null si no hay nada pendiente). */
+    public static String pendingVersion() {
+        return pendingVersion;
+    }
+
+    /**
+     * El usuario cerró el banner de la actualización pendiente: se registra como descartada
+     * para no volver a ofrecer esa misma versión en próximos arranques.
+     */
+    public static void dismissPendingUpdate() {
+        String v = pendingVersion;
+        pendingVersion = null;
+        if (v != null && !v.isBlank()) {
+            updateState().markDismissed(v);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -148,39 +282,44 @@ public final class AutoUpdateService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Descarga el instalador usando HttpFiles:
-     *   - Buffer 8MB con BufferedInputStream + BufferedOutputStream en capas
-     *   - Retry automático x3 con backoff exponencial (1s, 2s, 4s)
-     *   - Timeout de conexión 30s / lectura 10min
-     *   - Progreso en tiempo real vía Consumer<Double>
+     * Descarga el instalador a un archivo temporal y solo lo publica cuando termina íntegro:
+     *   - Se escribe en {@code <destino>.part} y se renombra con move atómico al completar.
+     *   - Se contrasta el tamaño con Content-Length y con el tamaño que declara la API.
+     *   - Retry automático x3 con backoff exponencial (1s, 2s, 4s).
+     *   - Progreso en tiempo real vía Consumer<Double>.
      *
      * Solo notifica onDownloadComplete — la instalación la dispara el usuario.
      */
     public static void downloadAndInstallAsync(String installerUrl) {
+        downloadAndInstallAsync(installerUrl, null, null);
+    }
+
+    /**
+     * @param expectedSha256 hash SHA-256 del asset (formato {@code sha256:...} de la API), o null.
+     * @param expectedSize   tamaño del asset declarado por la API, o null.
+     */
+    public static void downloadAndInstallAsync(String installerUrl, String expectedSha256, Long expectedSize) {
         if (!downloading.compareAndSet(false, true)) return;
+        final String sha256 = (expectedSha256 == null || expectedSha256.isBlank()) ? pendingDigest : expectedSha256;
+        final Long   size   = (expectedSize == null)                      ? pendingSize   : expectedSize;
 
         Thread t = new Thread(() -> {
             Path dest = null;
             try {
-                boolean isWindows = isWindows();
-                String  ext       = isWindows ? ".exe" : ".deb";
-
-                Path updateDir = isWindows
-                        ? Path.of(System.getenv().getOrDefault("LOCALAPPDATA",
-                                  System.getProperty("java.io.tmpdir")), "MeaCore", "updates")
-                        : Path.of(System.getProperty("user.home"), ".cache", "meacore", "updates");
+                String  ext = isWindows() ? ".exe" : ".deb";
+                Path updateDir = updatesDir();
 
                 Files.createDirectories(updateDir);
 
-                // Limpiar instaladores anteriores antes de descargar
+                // Limpiar instaladores anteriores y restos de descargas interrumpidas.
                 cleanOldInstallers(updateDir, ext);
+                cleanStaleParts(updateDir, ext);
 
                 dest = updateDir.resolve("meacore-update-" + System.currentTimeMillis() + ext);
                 final Path finalDest = dest;
 
-                // HttpFiles: 8MB buffer + BufferedI/O + retry x3 + backoff exponencial
-                // sin hash (null) porque GitHub no expone el SHA del asset en la API
-                HttpFiles.downloadIfHashMismatch(installerUrl, finalDest, null, fraction -> {
+                // .part + move atómico: el destino solo existe si la descarga fue completa.
+                HttpFiles.downloadAtomically(installerUrl, finalDest, null, size, fraction -> {
                     if (listener != null) {
                         listener.onDownloadProgress(fraction < 0 ? -1.0 : fraction);
                     }
@@ -191,18 +330,27 @@ public final class AutoUpdateService {
                     throw new IllegalStateException("El archivo descargado está vacío.");
                 }
 
-                // Unblock-File ANTES de notificar al listener
-                // → cuando el usuario clique "Reiniciar Ahora" ya estará desbloqueado
-                if (isWindows) {
-                    unblockFileAsync(finalDest);
+                // Verificación de integridad (SHA-256) antes de permitir la instalación.
+                // Sin hash disponible NO se instala automáticamente: se ofrece descarga manual.
+                String verified = sha256 == null || sha256.isBlank()
+                        ? null
+                        : verifySha256(finalDest, sha256);
+                if (sha256 != null && !sha256.isBlank() && verified == null) {
+                    throw new IllegalStateException("SHA256 mismatch");
+                }
+
+                if (verified == null) {
+                    if (listener != null) listener.onUnverifiedDownload(finalDest);
+                    return;
                 }
 
                 if (listener != null) listener.onDownloadComplete(finalDest);
 
             } catch (Exception ex) {
-                // Limpiar archivo parcial para no dejar basura en disco
+                // Limpiar el .part/archivo incompleto para no dejar basura en disco
                 if (dest != null) {
                     try { Files.deleteIfExists(dest); } catch (Exception ignored) {}
+                    try { Files.deleteIfExists(HttpFiles.partPathFor(dest)); } catch (Exception ignored) {}
                 }
                 if (listener != null) listener.onDownloadError(humanizeError(ex));
             } finally {
@@ -217,14 +365,28 @@ public final class AutoUpdateService {
     // INSTALL  (llamado desde la UI cuando el usuario confirma)
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Lanza el instalador y relanza el launcher. La versión queda registrada como instalada
+     * solo si el proceso del instalador arrancó bien: si falla, el usuario puede reintentar.
+     */
     public static void installFromPath(Path installerPath) {
         if (!installing.compareAndSet(false, true)) return;
         new Thread(() -> {
-            try {
-                executeInstaller(installerPath, isWindows());
-            } finally {
+            if (!launchInstallerProcess(installerPath, isWindows())) {
                 installing.set(false);
+                return;
             }
+
+            // Instalador en marcha: registrar la versión ANTES de cerrar el launcher para
+            // que el próximo arranque no vuelva a ofrecer la misma actualización.
+            String v = pendingVersion;
+            if (v != null && !v.isBlank()) {
+                updateState().markInstalled(v);
+                pendingVersion = null;
+            }
+
+            installing.set(false);
+            exitAppSoon();
         }, "meacore-update-install").start();
     }
 
@@ -232,49 +394,102 @@ public final class AutoUpdateService {
     // IMPLEMENTACIÓN INTERNA
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static void executeInstaller(Path installerPath, boolean isWindows) {
+    /**
+     * Script de actualización para Windows.
+     *
+     * <p>Secuencia: espera a que el launcher cierre → mata el proceso → arranca el instalador
+     * capturando su PID → <b>comprueba su exit code</b> → relanza el launcher solo si la
+     * instalación funcionó. Si el instalador falla, deja constancia en un log junto al
+     * instalador y NO relanza, para que el usuario vea el error en vez de un launcher
+     * mysteriously igual que antes.
+     *
+     * <p>No se usa PowerShell ni Unblock-File: el SHA-256 ya se verificó antes de llegar
+     * aquí, y si el antivirus bloquea el ejecutable es mejor decirlo que saltarse la
+     * protección en silencio.
+     *
+     * @param installerPath ruta absoluta del instalador .exe verificado.
+     * @param currentExe    ruta absoluta del ejecutable del launcher en curso.
+     */
+    static String windowsUpdaterScript(String installerPath, String currentExe) {
+        String log = "%~dp0meacore_update.log";
+
+        return "@echo off\r\n"
+                + "chcp 65001 > nul\r\n"
+                + "title MeaCore Updater - Actualizando...\r\n"
+                + "setlocal\r\n"
+                + "echo.\r\n"
+                + "echo ================================================\r\n"
+                + "echo        ACTUALIZANDO MEACORE LAUNCHER\r\n"
+                + "echo ================================================\r\n"
+                + "echo.\r\n"
+
+                // 1. Dar tiempo a que el launcher cierre y libere el ejecutable.
+                + "echo [1/3] Esperando a que el Launcher se cierre...\r\n"
+                + "timeout /t 5 /nobreak > nul\r\n"
+                + "taskkill /F /IM \"MeaCore Launcher.exe\" /T > nul 2>&1\r\n"
+
+                // 2. Instalar guardando el PID para poder esperar su fin y su codigo.
+                + "echo [2/3] Instalando...\r\n"
+                + "start \"\" /wait \"MeaCore Updater\" \"" + installerPath + "\"\r\n"
+                + "set \"INSTALLER_PID=%ERRORLEVEL%\"\r\n"
+                + "echo PID del instalador: %INSTALLER_PID%\r\n"
+
+                // 3. Solo si terminó bien, relanzar.
+                + "if not \"%INSTALLER_PID%\"==\"0\" (\r\n"
+                + "    echo.\r\n"
+                + "    echo [3/3] La instalacion termino con error: %INSTALLER_PID%\r\n"
+                + "    echo El launcher NO se ha relanzado. Revisa el instalador.\r\n"
+                + "    > \"" + log + "\" echo Instalacion fallida. Codigo: %INSTALLER_PID%\r\n"
+                + "    timeout /t 30 /nobreak > nul\r\n"
+                + "    goto :fin\r\n"
+                + ")\r\n"
+                + "echo [3/3] Instalacion correcta. Relanzando MeaCore Launcher...\r\n"
+                + "if exist \"" + currentExe + "\" (\r\n"
+                + "    start \"\" \"" + currentExe + "\"\r\n"
+                + ") else (\r\n"
+                + "    echo No se encontro el launcher en: \"" + currentExe + "\"\r\n"
+                + "    > \"" + log + "\" echo Instalacion OK pero no se encontro el launcher en " + currentExe + "\r\n"
+                + "    timeout /t 30 /nobreak > nul\r\n"
+                + ")\r\n"
+
+                + ":fin\r\n"
+                + "del \"%~f0\"\r\n"
+                + "endlocal\r\n"
+                + "exit /b 0\r\n";
+    }
+
+    /**
+     * Escribe el script de actualización (bat en Windows, comando de paquete en Linux) y lo
+     * lanza desacoplado. NO cierra el launcher: eso lo hace installFromPath() solo si el
+     * proceso arrancó bien, para poder marcar la versión como instalada antes de morir.
+ *
+     * @return true si el instalador quedó en marcha.
+     */
+    private static boolean launchInstallerProcess(Path installerPath, boolean isWindows) {
         try {
+            if (!Files.exists(installerPath)) {
+                if (listener != null) {
+                    listener.onDownloadError("El instalador ya no está en disco. Pulsa 'Buscar Actualizaciones' para descargarlo de nuevo.");
+                }
+                return false;
+            }
+
             String absPath = installerPath.toAbsolutePath().toString();
 
             if (isWindows) {
-                // Obtener ruta del ejecutable actual para relanzarlo con precisión
+                // Ruta del ejecutable actual, para relanzar exactamente la misma versión.
                 String currentExe = ProcessHandle.current().info().command().orElse("MeaCore Launcher.exe");
-                
+
                 Path batFile = installerPath.getParent()
                         .resolve("meacore_updater_" + System.currentTimeMillis() + ".bat");
 
-                String bat =
-                    "@echo off\r\n" +
-                    "chcp 65001 > nul\r\n" + // Forzar UTF-8 en la consola
-                    "title MeaCore Updater - Actualizando...\r\n" +
-                    "echo. \r\n" +
-                    "echo ================================================\r\n" +
-                    "echo        ACTUALIZANDO MEACORE LAUNCHER\r\n" +
-                    "echo ================================================\r\n" +
-                    "echo. \r\n" +
-                    "echo 1. Esperando a que el Launcher se cierre...\r\n" +
-                    "timeout /t 5 /nobreak > nul\r\n" +
-                    "taskkill /F /IM \"MeaCore Launcher.exe\" /T > nul 2>&1\r\n" +
-                    "echo. \r\n" +
-                    "echo 2. Iniciando Instalador (Si pide permisos, acepta)...\r\n" +
-                    "start /wait \"\" \"" + absPath + "\" /SILENT /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /SUPPRESSMSGBOXES\r\n" +
-                    "echo. \r\n" +
-                    "echo 3. Relanzando MeaCore Launcher...\r\n" +
-                    "if exist \"" + currentExe + "\" (\r\n" +
-                    "    start \"\" \"" + currentExe + "\"\r\n" +
-                    ") else (\r\n" +
-                    "    echo No se pudo relanzar automaticamente desde: \"" + currentExe + "\"\r\n" +
-                    "    echo Por favor, abre el launcher manualmente.\r\n" +
-                    "    pause\r\n" +
-                    ")\r\n" +
-                    "del \"%~f0\"\r\n" +
-                    "exit\r\n";
+                Files.writeString(batFile, "\uFEFF" + windowsUpdaterScript(absPath, currentExe));
 
-                Files.writeString(batFile, "\uFEFF" + bat);
-
+                // El script se abre en su propia ventana para que el usuario vea el progreso.
+                // Se devuelve el proceso ya: el launcher cierra después de registrar la versión.
                 new ProcessBuilder(
                         "cmd", "/c", "start", "\"MeaCore Updater\"",
-                        "\"" + batFile.toAbsolutePath().toString() + "\"")
+                        "\"" + batFile.toAbsolutePath() + "\"")
                         .start();
 
             } else {
@@ -302,10 +517,7 @@ public final class AutoUpdateService {
                 new ProcessBuilder("bash", "-c", cmd).start();
             }
 
-            // 2000ms para que el proceso hijo se desacople completamente
-            Thread.sleep(2000);
-            Platform.exit();
-            System.exit(0);
+            return true;
 
         } catch (Exception e) {
             // No cerramos el launcher si la elevación/instalación falló:
@@ -313,20 +525,22 @@ public final class AutoUpdateService {
             if (listener != null) {
                 listener.onDownloadError("No se pudo lanzar la instalación: " + e.getMessage());
             }
+            return false;
         }
     }
 
     /**
-     * Lanza PowerShell Unblock-File como fire-and-forget.
-     * No usa .waitFor() — nunca bloquea el hilo de descarga.
+     * Cierra el launcher dejando que el instalador se haga cargo del proceso.
+     * 2000ms para que el proceso hijo se desacople completamente.
      */
-    private static void unblockFileAsync(Path file) {
+    private static void exitAppSoon() {
         try {
-            new ProcessBuilder(
-                    "powershell", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-WindowStyle", "Hidden",
-                    "-Command", "Unblock-File -Path '" + file.toAbsolutePath() + "'")
-                    .start();
-        } catch (Exception ignored) {}
+            Thread.sleep(2000);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        Platform.exit();
+        System.exit(0);
     }
 
     /**
@@ -341,6 +555,45 @@ public final class AutoUpdateService {
                       try { Files.deleteIfExists(p); } catch (Exception ignored) {}
                   });
         } catch (Exception ignored) {}
+    }
+
+    /**
+     * Elimina restos {@code .part} de descargas interrumpidas.
+     * Solo se toca la carpeta de updates: nunca se borra un instalador completo.
+     */
+    private static void cleanStaleParts(Path dir, String ext) {
+        try (var stream = Files.list(dir)) {
+            stream.filter(p -> p.getFileName().toString().startsWith("meacore-update-")
+                           && p.getFileName().toString().endsWith(ext + ".part"))
+                  .forEach(p -> {
+                      try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                  });
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Verifica el SHA-256 del instalador contra el digest que publica la API de GitHub.
+     *
+     * @param expected digest con o sin el prefijo {@code sha256:}.
+     * @return el hash en hexadecimal si coincide, o null si no coincide o no se pudo calcular.
+     *         null NUNCA debe interpretarse como "verificado".
+     */
+    private static String verifySha256(Path file, String expected) {
+        try {
+            String want = expected.trim();
+            if (want.regionMatches(true, 0, "sha256:", 0, 7)) {
+                want = want.substring(7);
+            }
+            want = want.trim().toLowerCase();
+
+            String got;
+            try (InputStream in = Files.newInputStream(file)) {
+                got = Hashing.sha256Hex(in);
+            }
+            return want.equals(got) ? got : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -360,7 +613,7 @@ public final class AutoUpdateService {
         if (msg.contains("timed out") || msg.contains("timeout")) {
             return "La descarga tardó demasiado. Verifica tu conexión e intenta de nuevo.";
         }
-        if (msg.contains("SHA1 mismatch")) {
+        if (msg.contains("SHA1 mismatch") || msg.contains("SHA256 mismatch")) {
             return "El archivo descargado está corrupto. Intenta de nuevo.";
         }
         if (msg.contains("vacío")) {
@@ -369,30 +622,95 @@ public final class AutoUpdateService {
         return "Error al descargar: " + msg;
     }
 
-    private static String normalizeVersion(String raw) {
-        if (raw == null) return "";
-        return raw.replaceFirst("^bat-", "")
-                  .replaceFirst("^[vV]", "")
-                  .replaceAll("(?i)-(alfa|alpha|beta|rc|snapshot|pre|dev).*", "")
-                  .trim();
+    /**
+     * Convierte el estado HTTP de la API de GitHub en un mensaje accionable en español.
+     * 403/429 son el límite de peticiones de la API sin autenticar: no es un error del usuario.
+     */
+    private static String checkErrorMessage(int status) {
+        if (status <= 0) {
+            return "Sin conexión con GitHub. Revisa tu red e inténtalo de nuevo.";
+        }
+        if (status == 403 || status == 429) {
+            return "GitHub está limitando las comprobaciones por ahora. Se volverá a intentar automáticamente más tarde.";
+        }
+        if (status == 404) {
+            return "No se encontró ninguna versión publicada todavía.";
+        }
+        if (status >= 500) {
+            return "GitHub está teniendo problemas en este momento. Intenta más tarde.";
+        }
+        return "No se pudo comprobar si hay actualizaciones (código " + status + ").";
+    }
+
+    /** Respuesta de una consulta a la API de releases. */
+    private record FetchResult(int status, JsonNode body) {}
+
+    /**
+     * Consulta una URL de release. Nunca lanza: cualquier fallo de red se traduce a un estado
+     * para que el llamador pueda probar la otra fuente.
+     */
+    private static FetchResult fetchLatestRelease(HttpClient client, String url) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "MeaCoreLauncher/" + LauncherMetadata.VERSION)
+                // Timeout total del request — sin esto usa solo el connectTimeout
+                .timeout(Duration.ofSeconds(15))
+                .GET()
+                .build();
+
+        try {
+            HttpResponse<InputStream> res = client.send(req, HttpResponse.BodyHandlers.ofInputStream());
+            if (res.statusCode() != 200) {
+                res.body().close();
+                return new FetchResult(res.statusCode(), null);
+            }
+            try (InputStream body = res.body()) {
+                return new FetchResult(200, M.readTree(body));
+            }
+        } catch (Exception e) {
+            // Sin red: se distingue de un 200 con cuerpo ilegible devolviendo 0.
+            return new FetchResult(0, null);
+        }
+    }
+
+    /** true si aún no ha pasado la hora desde la última comprobación. */
+    private static boolean isOnCooldown(Instant lastCheck) {
+        return Duration.between(lastCheck, Instant.now()).compareTo(CHECK_COOLDOWN) < 0;
+    }
+
+    /** Traduce fallos de red a mensajes claros, sin trazas ni rutas técnicas. */
+    private static String humanizeCheckError(Exception ex) {
+        String msg = ex.getMessage() == null ? "" : ex.getMessage();
+        if (msg.contains("UnknownHost")) {
+            return "Sin conexión a internet. Conéctate e inténtalo de nuevo.";
+        }
+        if (msg.contains("ConnectException") || msg.contains("Connection refused")) {
+            return "No se pudo conectar con GitHub. Revisa tu conexión e inténtalo de nuevo.";
+        }
+        if (msg.contains("timeout") || msg.contains("timed out")) {
+            return "GitHub tardó demasiado en responder. Inténtalo de nuevo.";
+        }
+        return "No se pudo comprobar si hay actualizaciones. Inténtalo de nuevo.";
+    }
+
+    /**
+     * Directorio donde se guardan los instaladores descargados y el estado de actualización.
+     * Windows: %LOCALAPPDATA%/MeaCore/updates — Linux: ~/.cache/meacore/updates
+     */
+    private static Path updatesDir() {
+        return isWindows()
+                ? Path.of(System.getenv().getOrDefault("LOCALAPPDATA",
+                          System.getProperty("java.io.tmpdir")), "MeaCore", "updates")
+                : Path.of(System.getProperty("user.home"), ".cache", "meacore", "updates");
+    }
+
+    /** Estado persistente de actualizaciones (best-effort: nunca lanza). */
+    private static UpdateState updateState() {
+        return UpdateState.load(updatesDir());
     }
 
     private static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
-    }
-
-    private static boolean isNewer(String latest, String current) {
-        try {
-            String[] lp = latest.split("\\.");
-            String[] cp = current.split("\\.");
-            int max = Math.max(lp.length, cp.length);
-            for (int i = 0; i < max; i++) {
-                int l = i < lp.length ? Integer.parseInt(lp[i].replaceAll("[^0-9]", "")) : 0;
-                int c = i < cp.length ? Integer.parseInt(cp[i].replaceAll("[^0-9]", "")) : 0;
-                if (l > c) return true;
-                if (l < c) return false;
-            }
-        } catch (Exception ignored) {}
-        return false;
     }
 }
