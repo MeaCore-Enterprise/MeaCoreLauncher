@@ -40,6 +40,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LauncherApp extends Application {
 
+    /** Estilo normal del banner de actualización. */
+    private static final String UPDATE_BANNER_STYLE =
+            "-fx-background-color: #0E639C; -fx-border-color: transparent transparent #1177BB transparent; -fx-border-width: 0 0 1 0;";
+
+    /** Estilo del banner cuando la actualización falló. */
+    private static final String UPDATE_BANNER_ERROR_STYLE =
+            "-fx-background-color: #5a1a1a; -fx-border-color: transparent transparent #7d2626 transparent; -fx-border-width: 0 0 1 0;";
+
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final List<ManifestVersionEntry> allManifestEntries = FXCollections.observableArrayList();
     
@@ -85,6 +93,10 @@ public class LauncherApp extends Application {
     private Button updateBtn;
     private Label sidebarVersionLabel;
     private HBox sidebarStatusBox;
+    private Button checkUpdateBtn;
+    private Path downloadedInstaller;
+    /** URL del asset que se está descargando/ offerta, para el fallback de descarga manual. */
+    private volatile String pendingDownloadUrl;
     private final Map<String, Button> navButtons = new HashMap<>();
     private StackPane javaDownloadOverlay;
     private ProgressBar javaProgress;
@@ -197,12 +209,13 @@ public class LauncherApp extends Application {
             updateBanner.setManaged(true);
         });
 
-        Button checkUpdateBtn = new Button("Buscar Actualizaciones");
+        checkUpdateBtn = new Button("Buscar Actualizaciones");
         checkUpdateBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: #888888; -fx-font-size: 10px; -fx-padding: 0; -fx-cursor: hand;");
         checkUpdateBtn.setOnAction(e -> {
             checkUpdateBtn.setText("Buscando...");
             checkUpdateBtn.setDisable(true);
-            AutoUpdateService.checkForUpdatesAsync();
+            // force=true: una búsqueda manual del usuario no espera el cooldown de 1 hora.
+            AutoUpdateService.checkForUpdatesAsync(true);
         });
 
         VBox sidebarFooter = new VBox(5, sidebarStatusBox, sidebarVersionLabel, checkUpdateBtn);
@@ -264,8 +277,11 @@ public class LauncherApp extends Application {
         AutoUpdateService.setListener(new AutoUpdateService.UpdateListener() {
             @Override
             public void onUpdateFound(String version, String url) {
+                pendingDownloadUrl = url;
                 Platform.runLater(() -> {
-                    updateStatus.setText("🚀 Descargando v" + version + " en segundo plano...");
+                    updateBanner.setStyle(UPDATE_BANNER_STYLE);
+                    updateStatus.setText("Actualización v" + version + " disponible. Descargando...");
+                    updateProgress.setProgress(0);
                     updateBtn.setText("Descargando...");
                     updateBtn.setDisable(true);
                     updateBanner.setVisible(true);
@@ -281,34 +297,124 @@ public class LauncherApp extends Application {
             public void onDownloadProgress(double fraction) {
                 Platform.runLater(() -> {
                     updateProgress.setProgress(fraction);
-                    updateStatus.setText("Descargando actualización: " + (int)(fraction * 100) + "%");
+                    updateStatus.setText(fraction < 0
+                            ? "Descargando actualización..."
+                            : "Descargando actualización: " + (int)(fraction * 100) + "%");
                 });
             }
 
             @Override
             public void onDownloadComplete(Path installerPath) {
                 Platform.runLater(() -> {
+                    downloadedInstaller = installerPath;
                     updateProgress.setProgress(1.0);
                     updateStatus.setText("✅ Actualización lista. Haz clic en 'Reiniciar Ahora' para instalar.");
                     updateBtn.setText("Reiniciar Ahora");
                     updateBtn.setDisable(false);
                     // CORRECCIÓN: el botón llama installFromPath (que desbloquea SmartScreen,
                     // escribe el .bat y lo lanza de forma desacoplada) en lugar de System.exit(0)
-                    updateBtn.setOnAction(e -> AutoUpdateService.installFromPath(installerPath));
-                    sidebarVersionLabel.setText("v" + LauncherMetadata.VERSION + " → Nueva lista");
+                    updateBtn.setOnAction(e -> {
+                        // El instalador mata "MeaCore Launcher.exe" por nombre: si el juego
+                        // sigue abierto puede cerrarlo de forma inesperado a mitad de la
+                        // instalación. Se bloquea con el juego en marcha.
+                        if (!activeProcesses.isEmpty()) {
+                            updateStatus.setText("⛔ Cierra el juego antes de instalar la actualización.");
+                            // Se deja el botón activo: el usuario reintenta tras cerrar el juego.
+                            updateBtn.setDisable(false);
+                            updateBtn.setText("Reiniciar Ahora");
+                            return;
+                        }
+                        updateBtn.setDisable(true);
+                        updateBtn.setText("Instalando...");
+                        updateStatus.setText("Instalando actualización. El launcher se cerrará en breve...");
+                        // El label vuelve a su estado normal: si la instalación falla, el
+                        // usuario no debe quedarse con un "→ Nueva lista" pegado.
+                        setSidebarVersion(getCurrentVersionLabel());
+                        AutoUpdateService.installFromPath(installerPath);
+                    });
+                    setSidebarVersion(getPendingVersionLabel());
                 });
             }
 
             @Override
             public void onDownloadError(String message) {
                 Platform.runLater(() -> {
+                    downloadedInstaller = null;
                     updateBtn.setText("❌ Error");
                     updateBtn.setDisable(true);
                     updateStatus.setText("⚠ " + message);
                     updateBanner.setVisible(true);
                     updateBanner.setManaged(true);
-                    updateBanner.setStyle("-fx-background-color: #5a1a1a;");
+                    updateBanner.setStyle(UPDATE_BANNER_ERROR_STYLE);
+                    // El error no es una actualización pendiente: label a su estado normal.
+                    setSidebarVersion(getCurrentVersionLabel());
                     log("⚠ Error de actualización: " + message);
+                });
+            }
+
+            @Override
+            public void onCheckFinished() {
+                // Rehabilita el botón "Buscar Actualizaciones" (antes se quedaba en
+                // "Buscando..." para siempre).
+                Platform.runLater(() -> {
+                    if (checkUpdateBtn != null) {
+                        checkUpdateBtn.setText("Buscar Actualizaciones");
+                        checkUpdateBtn.setDisable(false);
+                    }
+                });
+            }
+
+            @Override
+            public void onUnverifiedDownload(Path installerPath) {
+                // Descargado pero NO verificado (GitHub no publica digest, o no coincide):
+                // no se ejecuta nada automáticamente. Se ofrece la descarga manual en el
+                // navegador para que el usuario la revise e instale.
+                Platform.runLater(() -> {
+                    downloadedInstaller = null;
+                    updateProgress.setProgress(1.0);
+                    updateStatus.setText("⚠ No se pudo verificar la descarga. Descárrala desde GitHub e instálala manualmente.");
+                    updateBanner.setVisible(true);
+                    updateBanner.setManaged(true);
+                    updateBanner.setStyle(UPDATE_BANNER_STYLE);
+                    updateBtn.setText("Descargar manualmente");
+                    updateBtn.setDisable(false);
+                    updateBtn.setOnAction(ev -> openPendingDownloadInBrowser());
+                    setSidebarVersion(getCurrentVersionLabel());
+                    log("⚠ Actualización descargada sin verificación de integridad; se ofrece descarga manual.");
+                });
+            }
+
+            @Override
+            public void onCheckError(String message) {
+                // Fallo de COMPROBACIÓN (no de descarga): se avisa sin tocar el botón
+                // "Reiniciar Ahora", que no está en juego aquí. El texto y el estado del
+                // botón "Buscar Actualizaciones" los deja siempre onCheckFinished.
+                Platform.runLater(() -> {
+                    if (downloadedInstaller == null && AutoUpdateService.pendingVersion() == null) {
+                        updateStatus.setText("⚠ " + message);
+                        updateBanner.setVisible(true);
+                        updateBanner.setManaged(true);
+                        updateBanner.setStyle(UPDATE_BANNER_ERROR_STYLE);
+                    }
+                    log("⚠ Error al comprobar actualizaciones: " + message);
+                });
+            }
+
+            @Override
+            public void onCooldownSkipped() {
+                // Check automático saltado por el rate limit de 1 hora: no molestar al
+                // usuario. El botón lo restaura onCheckFinished.
+                log("ℹ Comprobación de actualizaciones omitida por límite de frecuencia.");
+            }
+
+            @Override
+            public void onUpToDate() {
+                // Ya está en la última versión: se limpia cualquier estado visual de
+                // actualización pendiente (incluido el banner y el label del sidebar).
+                Platform.runLater(() -> {
+                    if (downloadedInstaller == null && AutoUpdateService.pendingVersion() == null) {
+                        resetUpdateUi();
+                    }
                 });
             }
         });
@@ -344,6 +450,15 @@ public class LauncherApp extends Application {
     private void initData() throws Exception {
         LauncherDirectories dirs = LauncherDirectories.fromDefault();
         dirs.ensureBaseDirs();
+
+        // Si se migraron datos de una instalación antigua, se deja constancia en el log.
+        LauncherDirectories.MigrationReport migration = dirs.migration();
+        if (migration.migratedAnything() || migration.failed() > 0) {
+            log("[MIGRACIÓN] Datos: " + migration.copied() + " copiados, "
+                    + migration.skipped() + " ya existían, " + migration.failed() + " con problemas. "
+                    + "Tus datos anteriores no se han borrado.");
+        }
+
         facade = new LauncherFacade(dirs);
         profiles = new ArrayList<>(facade.profiles().loadOrCreateDefault());
         for (LauncherProfile p : profiles) {
@@ -1814,7 +1929,7 @@ public class LauncherApp extends Application {
         HBox banner = new HBox(15);
         banner.setAlignment(Pos.CENTER_LEFT);
         banner.setPadding(new Insets(10, 20, 10, 20));
-        banner.setStyle("-fx-background-color: #0E639C; -fx-border-color: transparent transparent #1177BB transparent; -fx-border-width: 0 0 1 0;");
+        banner.setStyle(UPDATE_BANNER_STYLE);
 
         updateStatus = new Label("Actualización disponible");
         updateStatus.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
@@ -1832,6 +1947,11 @@ public class LauncherApp extends Application {
         closeBtn.setOnAction(e -> {
             updateBanner.setVisible(false);
             updateBanner.setManaged(false);
+            // Registrar el descarte para no re-ofrecer esta misma versión en el próximo
+            // arranque, y devolver el label del sidebar a su estado normal.
+            AutoUpdateService.dismissPendingUpdate();
+            downloadedInstaller = null;
+            setSidebarVersion(getCurrentVersionLabel());
         });
 
         Region spacer = new Region();
@@ -1839,6 +1959,66 @@ public class LauncherApp extends Application {
 
         banner.getChildren().addAll(updateStatus, updateProgress, spacer, updateBtn, closeBtn);
         return banner;
+    }
+
+    /** Texto normal del label de versión del sidebar: "v1.6.1". */
+    private String getCurrentVersionLabel() {
+        return "v" + LauncherMetadata.VERSION;
+    }
+
+    /** Texto del label mientras hay una actualización pendiente: "v1.6.1 → v1.6.2". */
+    private String getPendingVersionLabel() {
+        String pending = AutoUpdateService.pendingVersion();
+        if (pending == null || pending.isBlank()) return getCurrentVersionLabel();
+        return getCurrentVersionLabel() + " → v" + pending;
+    }
+
+    private void setSidebarVersion(String text) {
+        if (sidebarVersionLabel != null) sidebarVersionLabel.setText(text);
+    }
+
+    /**
+     * Devuelve el banner y el label del sidebar a su estado inicial.
+     * Se llama cuando ya no hay nada pendiente: al estar actualizado, al descartar
+     * o al fallar la descarga. Sin esto el estilo de error y el texto "→ Nueva lista"
+     * se quedaban pegados de un run a otro.
+     */
+    private void resetUpdateUi() {
+        setSidebarVersion(getCurrentVersionLabel());
+        pendingDownloadUrl = null;
+        updateBanner.setVisible(false);
+        updateBanner.setManaged(false);
+        updateBanner.setStyle(UPDATE_BANNER_STYLE);
+        updateProgress.setProgress(0);
+        updateStatus.setText("Actualización disponible");
+        updateBtn.setText("Actualizar");
+        updateBtn.setDisable(true);
+        updateBtn.setOnAction(null);
+        sidebarStatusBox.setVisible(false);
+        sidebarStatusBox.setManaged(false);
+    }
+
+    /**
+     * Abre la release en el navegador para que el usuario descargue el instalador a mano.
+     * Es el fallback cuando el launcher no puede verificar la integridad de la descarga:
+     * GitHub muestra el hash del asset, así que el usuario puede compararlo.
+     */
+    private void openPendingDownloadInBrowser() {
+        String url = pendingDownloadUrl;
+        if (url == null || url.isBlank()) {
+            updateStatus.setText("⚠ No se pudo abrir el navegador. Pulsa 'Buscar Actualizaciones' para reintentar.");
+            return;
+        }
+        try {
+            new ProcessBuilder(
+                    "xdg-open", url).start();
+        } catch (Exception ignored) {
+            try {
+                java.awt.Desktop.getDesktop().browse(java.net.URI.create(url));
+            } catch (Exception e) {
+                updateStatus.setText("⚠ No se pudo abrir el navegador. Copia esta dirección: " + url);
+            }
+        }
     }
 
     private void handlePlayClick() {
