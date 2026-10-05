@@ -229,6 +229,13 @@ jobs:
       contents: write
 
     steps:
+      # El job solo descarga artefactos, pero necesita scripts/ para decidir si la tag es
+      # una pre-release: es la regla que evita que una RC llegue a /releases/latest.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
       - name: Download installers
         uses: actions/download-artifact@v4
         with:
@@ -284,11 +291,26 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/*.exe dist/*.deb)
+          # latest.json va con los instaladores: es el manifest que lee el Worker y sin él
+          # el launcher vuelve a depender de la API de GitHub (60 peticiones/hora sin token).
+          assets=(dist/*.exe dist/*.deb dist/latest.json)
 
           if [ ${#assets[@]} -eq 0 ]; then
             echo "::error::No hay instaladores que publicar"
             exit 1
+          fi
+          if [ ! -f dist/latest.json ]; then
+            echo "::error::Falta dist/latest.json (el paso 'Generate latest.json' no lo produjo)"
+            exit 1
+          fi
+
+          # Una tag con sufijo de pre-release (v1.6.2-rc.1) NO debe publicarse como estable:
+          # /releases/latest y releases/latest ignoran pre-releases, asi que marcarla es lo
+          # unico que impide que todos los usuarios reciban una RC.
+          if scripts/is-prerelease-tag.sh "$TAG"; then
+            prerelease_flag="--prerelease"
+          else
+            prerelease_flag=""
           fi
 
           state=$(gh release view "$TAG" --json isDraft -q '.isDraft' 2>/dev/null || echo "none")
@@ -298,12 +320,18 @@ jobs:
               # Draft primero: la release solo se publica cuando contiene los DOS
               # instaladores, así que nunca se publica una release a medias.
               echo "Creando draft para $TAG"
-              gh release create "$TAG" --draft --generate-notes --title "MeaCore Launcher $TAG"
+              gh release create "$TAG" --draft $prerelease_flag --generate-notes --title "MeaCore Launcher $TAG"
               gh release upload "$TAG" "${assets[@]}" --clobber
               ;;
             true)
               echo "El release $TAG ya existía como draft: se completan los assets"
               gh release upload "$TAG" "${assets[@]}" --clobber
+              # gh release edit necesita true/false explicitos: --prerelease sin valor no es valido.
+              if [ -n "$prerelease_flag" ]; then
+                gh release edit "$TAG" --prerelease=true
+              else
+                gh release edit "$TAG" --prerelease=false
+              fi
               ;;
             *)
               # Release ya publicado (re-ejecución manual): NO se borra ni se recrea,
@@ -333,5 +361,13 @@ jobs:
           fi
 
           # Solo ahora se publica: hay .exe, .deb y manifest verificados.
+          # Defense in depth: si la tag es pre-release pero el release quedó como estable,
+          # /releases/latest lo ofrecería a todos los usuarios. Better que falle el CI.
+          if scripts/is-prerelease-tag.sh "$TAG"; then
+            is_pre=$(gh release view "$TAG" --json isPrerelease -q '.isPrerelease')
+            [ "$is_pre" = "true" ] || { echo "::error::$TAG es una pre-release pero se creó como estable: /releases/latest la ofrecería a todos los usuarios"; exit 1; }
+            echo "Release $TAG publicado como PRERELEASE: /releases/latest la ignora (los usuarios siguen viendo la estable)"
+          fi
+
           gh release edit "$TAG" --draft=false
           echo "Release $TAG publicado con ambos instaladores y latest.json"

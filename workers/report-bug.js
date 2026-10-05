@@ -201,7 +201,15 @@ export default {
           });
         }
 
-        const data = await upstream.json();
+        let data;
+        try {
+          data = await upstream.json();
+        } catch {
+          // Un HTML con status 200 (pagina de error de un proxy o portal cautivo) no es un
+          // release: sin esto la excepcion sube y Cloudflare devuelve un 500 opaco, sin
+          // diagnostico, en vez de un 502 que el launcher sabe interpretar.
+          return json(502, { error: "La API de GitHub no devolvio JSON" });
+        }
         const response = new Response(JSON.stringify({
           tag_name: data.tag_name,
           name: data.name,
@@ -237,9 +245,9 @@ export default {
       // latest.json ya viene con la forma que el launcher espera (tag_name + assets con
       // name, browser_download_url, size y digest): se reenvía tal cual, validando que
       // trae al menos un asset para no cachear un manifest vacío por error.
-      const manifest = await upstream.json();
+      const manifest = await upstream.json().catch(() => null);
       if (!manifest || !Array.isArray(manifest.assets) || manifest.assets.length === 0) {
-        return json(502, { error: "latest.json sin assets" });
+        return json(502, { error: "latest.json sin assets o no es JSON valido" });
       }
 
       const response = new Response(JSON.stringify(manifest), {

@@ -271,5 +271,89 @@ pisen.
 | `mojang.HttpFilesAtomicDownloadTest` | `.part`, move atómico, tamaños, reanudación con `Range` |
 | `service.WindowsUpdaterScriptTest` | Exit code del instalador y relanzamiento condicional |
 | `paths.LauncherDirectoriesMigrationTest` | Migración no destructiva de datos del usuario |
+| `service.AutoUpdateServiceIntegrityTest` | SHA-256 incorrecto / ausente / tamaño corto contra un servidor HTTP real |
+| `workers/report-bug.test.mjs` (`node --test workers/`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
+
+## Checklist de prueba manual
+
+Los tests automatizados cubren la lógica, pero no lo que de verdad importa al final: que
+el juego arranca después de actualizar. Esta lista es la que hay que ejecutar antes de
+anunciar una versión.
+
+Se prueba sobre una **instalación real**, no sobre el repo: una copia de la
+instalación anterior en otra carpeta, o una máquina virtual. Probar sobre la
+instalación propia borra los datos de usuario que quieras conservar.
+
+### Preparación
+
+- [ ] Launcher en la versión **N** (la que se wants actualizar desde), instalada y funcionando.
+- [ ] `version.properties` = versión N, y una tag N+1 publicada (ver [Publicar una versión](#publicar-una-versión)).
+- [ ] Conocer dónde guarda datos el launcher: `%APPDATA%\MeaCoreLauncher` en Windows,
+      `~/.local/share/MeaCoreLauncher` en Linux.
+- [ ] Copia de seguridad de `launcher-data` por si hay que volver atrás.
+
+### Escenario 1 — Actualización normal N → N+1 (ambos SO)
+
+- [ ] Con la versión N abierta: aparece el aviso de actualización y la versión es correcta (no `v1.6.1` con `v`).
+- [ ] Al pulsar el botón de descarga, la barra progresa y termina.
+- [ ] **El juego arranca** y se puede jugar un rato (no vale con que solo abra la ventana).
+- [ ] La versión instalada ahora es N+1 (`--version` o el log de arranque).
+- [ ] Los datos de usuario siguen ahí: perfiles, versiones, ajustes.
+- [ ] Al arrancar de nuevo **no** ofrece N+1 otra vez (queda registrada como instalada).
+
+### Escenario 2 — Instalador corrupto (ambos SO)
+
+Cómo provocarlo: publicar un asset cuyo `latest.json` no corresponda con el binario, o
+cambiar el `.exe`/`.deb` de la release **después** de generar el manifest.
+
+- [ ] El launcher **no** instala nada y dice que el archivo está corrupto.
+- [ ] No queda ningún ejecutable suelto en el directorio de descargas
+      (`%LOCALAPPDATA%\MeaCore\updates` o `~/.cache/meacore/updates`): ni el archivo
+      final ni un `.part`.
+- [ ] El botón "Buscar actualizaciones" vuelve a estar usable (puede reintentarse).
+- [ ] El launcher sigue funcionando: se puede seguir jugando con la versión N.
+
+### Escenario 3 — Juego abierto al instalar
+
+- [ ] Con un juego abierto, lanzar la actualización.
+- [ ] El launcher avisa de que hay procesos activos y **no** ofrece instalar hasta cerrarlos
+      (`activeProcesses`).
+- [ ] Al cerrar el juego, la instalación se ofrece normalmente.
+- [ ] Al instalar, el launcher se cierra, corre el instalador y vuelve a arrancar.
+- [ ] No quedan dos instancias del launcher corriendo a la vez.
+
+### Escenario 4 — Sin internet / con internet que se va
+
+- [ ] Arrancar **sin** red: el aviso dice que no hay conexión (no "error desconocido").
+- [ ] El botón de reintentar funciona al conectar la red.
+- [ ] **Cortar la red a mitad de la descarga**: al reintentar, la descarga se reanuda
+      (`Range`) en vez de empezar de cero; si el servidor no soporta `Range`, termina
+      igualmente desde cero.
+- [ ] Al arrancar sin red, la **versión ya instalada** sigue funcionando: no se bloquea
+      el launcher porque no se pudo comprobar si hay actualizaciones.
+
+### Escenario 5 — Solo Linux
+
+- [ ] Con `pkexec` instalado, aparece el diálogo de PolicyKit y se instala sin pedir
+      contraseña en una terminal.
+- [ ] Sin `pkexec`, el fallback a `sudo` avisa de que necesita una terminal
+      (no falla en silencio).
+
+### Escenario 6 — Solo Windows
+
+- [ ] Sin errores de ExecutionPolicy ni ventanas de PowerShell: no hay PowerShell en el
+      flujo (la actualización va por `.bat` + `start /wait`).
+- [ ] El instalador devuelve 0 → el launcher se relanza solo.
+- [ ] Se fuerza un fallo del instalador (matarlo o lanzar un `.exe` que no sea instalador):
+      el launcher **no** se relanza en bucle y queda `meacore_update.log` junto al `.bat`.
+- [ ] Con SmartScreen / Defender activo, la descarga no queda bloqueada con el mensaje de
+      "archivo bloqueado por el antivirus" sin explicación.
+
+### Nota sobre el estado en Windows
+
+Al lanzar el instalador, el launcher marca la versión como instalada y se cierra: no puede
+saber si el instalador terminó bien. Si falla, en el siguiente arranque se puede volver a
+ofrecer. Está pendiente resolverlo con un marcador de resultado (§ *Cómo añadir una
+plataforma* → alcance real del refactor).
 
 Las pruebas de descarga usan un servidor HTTP local: no dependen de la red.
