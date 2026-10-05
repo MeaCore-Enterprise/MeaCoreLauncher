@@ -170,6 +170,12 @@ public class LauncherApp extends Application {
                         splashStage.close();
                         stage.show();
                         loadVersionManifestAsync();
+                        // Antes del check: si el arranque anterior lanzó un instalador y la
+                        // versión no cambió, hay que avisar. Si se hiciera después, el check
+                        // sobrescribiría el banner y el aviso se perdería.
+                        com.experimento.launcher.service.AutoUpdateService
+                                .resolvePendingInstallOnStartup(
+                                        com.experimento.launcher.LauncherMetadata.VERSION);
                         com.experimento.launcher.service.AutoUpdateService.checkForUpdatesAsync();
                     } catch (Exception ex) {
                         ex.printStackTrace();
@@ -381,6 +387,27 @@ public class LauncherApp extends Application {
                     updateBtn.setOnAction(ev -> openPendingDownloadInBrowser());
                     setSidebarVersion(getCurrentVersionLabel());
                     log("⚠ Actualización descargada sin verificación de integridad; se ofrece descarga manual.");
+                });
+            }
+
+            @Override
+            public void onInstallIncomplete() {
+                // El arranque anterior lanzó un instalador y la versión no cambió: la
+                // instalación falló (o el usuario la canceló). La versión destino ya está
+                // marcada como instalada, así que sin este aviso no se volvería a ofrecer
+                // nunca. Se ofrece la descarga manual.
+                Platform.runLater(() -> {
+                    downloadedInstaller = null;
+                    updateProgress.setProgress(0);
+                    updateStatus.setText("⚠ La actualización no se completó. Puedes descargarla e instalarla manualmente.");
+                    updateBanner.setVisible(true);
+                    updateBanner.setManaged(true);
+                    updateBanner.setStyle(UPDATE_BANNER_ERROR_STYLE);
+                    updateBtn.setText("Descargar manualmente");
+                    updateBtn.setDisable(false);
+                    updateBtn.setOnAction(ev -> openPendingDownloadInBrowser());
+                    setSidebarVersion(getCurrentVersionLabel());
+                    log("⚠ La instalación anterior no se completó; se ofrece descarga manual.");
                 });
             }
 

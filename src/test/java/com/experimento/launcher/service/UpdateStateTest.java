@@ -184,4 +184,81 @@ class UpdateStateTest {
         assertEquals("", state.installedVersion());
         assertFalse(state.isInstalled("1.6.2"));
     }
+
+    // ── Instalación pendiente: el cierre del launcher no deja el resultado a medias ──
+
+    @Test
+    void pendingInstallSurvivesReload(@TempDir Path dir) {
+        UpdateState.load(dir).markInstallPending("1.6.2");
+
+        UpdateState reloaded = UpdateState.load(dir);
+
+        assertTrue(reloaded.hasPendingInstall());
+        assertEquals("1.6.2", reloaded.pendingInstall());
+    }
+
+    @Test
+    void arrivingAtTheTargetVersionCountsAsSuccess(@TempDir Path dir) {
+        UpdateState state = UpdateState.load(dir);
+        state.markInstallPending("1.6.2");
+
+        assertEquals(UpdateState.InstallOutcome.SUCCEEDED, state.resolvePendingInstall("1.6.2"));
+    }
+
+    @Test
+    void stayingOnTheOldVersionCountsAsFailure(@TempDir Path dir) {
+        UpdateState state = UpdateState.load(dir);
+        state.markInstallPending("1.6.2");
+
+        // Es el caso de Windows: el instalador se lanzó, falló, y el launcher volvió a 1.6.1.
+        assertEquals(UpdateState.InstallOutcome.FAILED, state.resolvePendingInstall("1.6.1"));
+    }
+
+    @Test
+    void resolveIsIdempotentSoTheWarningIsShownOnce(@TempDir Path dir) {
+        UpdateState state = UpdateState.load(dir);
+        state.markInstallPending("1.6.2");
+
+        assertEquals(UpdateState.InstallOutcome.FAILED, state.resolvePendingInstall("1.6.1"));
+        // Segundo arranque: si no se limpió, el aviso saldría en cada inicio para siempre.
+        assertEquals(UpdateState.InstallOutcome.NONE, state.resolvePendingInstall("1.6.1"));
+        assertFalse(UpdateState.load(dir).hasPendingInstall());
+    }
+
+    @Test
+    void nothingPendingIsNotAFailure(@TempDir Path dir) {
+        assertEquals(UpdateState.InstallOutcome.NONE, UpdateState.load(dir).resolvePendingInstall("1.6.1"));
+    }
+
+    @Test
+    void clearPendingInstallForgetsItWithoutResolving(@TempDir Path dir) {
+        UpdateState state = UpdateState.load(dir);
+        state.markInstallPending("1.6.2");
+        state.clearPendingInstall();
+
+        assertFalse(state.hasPendingInstall());
+        assertEquals(UpdateState.InstallOutcome.NONE, state.resolvePendingInstall("1.6.1"));
+    }
+
+    @Test
+    void pendingInstallIsPersistedAsJson(@TempDir Path dir) throws Exception {
+        UpdateState.load(dir).markInstallPending("1.6.2");
+
+        String json = Files.readString(dir.resolve("update-state.json"));
+
+        assertTrue(json.contains("\"pendingInstall\""), json);
+        assertTrue(json.contains("1.6.2"), json);
+    }
+
+    @Test
+    void anOldStateFileWithoutPendingInstallStillLoads(@TempDir Path dir) throws Exception {
+        // Estado escrito por una versión anterior del launcher: sin el campo, no debe fallar.
+        Files.writeString(dir.resolve("update-state.json"),
+                "{\"installedVersion\":\"1.6.0\",\"dismissedVersion\":\"\",\"lastCheckMillis\":0}");
+
+        UpdateState state = UpdateState.load(dir);
+
+        assertEquals("1.6.0", state.installedVersion());
+        assertFalse(state.hasPendingInstall());
+    }
 }

@@ -59,6 +59,19 @@ public final class AutoUpdateService {
     private static final String MIRROR_API_LATEST =
             "https://meacorelauncher.meacore-enterprise.workers.dev/api/latest-release";
 
+    /**
+     * Override de pruebas: apunta el check a un {@code latest.json} concreto, saltándose la
+     * API de GitHub y el Worker. Sirve para ensayar el ciclo N -> N+1 completo sin publicar
+     * una release estable que llegue a los usuarios de verdad.
+     *
+     * <p>Se activa con la propiedad de sistema {@code -Dmeacore.update.manifest=<url>} o con
+     * la variable de entorno {@code MEACORE_UPDATE_MANIFEST}. Solo tiene efecto si apunta a
+     * http/https: cualquier otro valor se ignora, para que un valor mal escrito no rompa el
+     * launcher en silencio.</p>
+     */
+    private static final String MANIFEST_OVERRIDE_PROPERTY = "meacore.update.manifest";
+    private static final String MANIFEST_OVERRIDE_ENV = "MEACORE_UPDATE_MANIFEST";
+
     private static final ObjectMapper M = new ObjectMapper();
 
     // Listener de eventos — volatile para visibilidad entre hilos
@@ -99,6 +112,13 @@ public final class AutoUpdateService {
          * UI debe ofrecer la descarga manual en el navegador en lugar de instalar.
          */
         default void onUnverifiedDownload(Path installerPath) {}
+
+        /**
+         * El arranque anterior lanzó un instalador pero la versión no cambió: la
+         * instalación no se completó. La UI debe ofrecer la descarga manual, porque la
+         * versión ya está marcada como instalada y no se volverá a ofrecer sola.
+         */
+        default void onInstallIncomplete() {}
 
         /** Fallo al COMPROBAR si hay actualizaciones (red, API, rate limit). */
         default void onCheckError(String message) {}
@@ -157,18 +177,32 @@ public final class AutoUpdateService {
                         .connectTimeout(Duration.ofSeconds(10))
                         .build();
 
-                FetchResult result = fetchLatestRelease(client, GITHUB_API_LATEST);
-
-                // GitHub limita a 60 peticiones/hora sin token: con el límite alcanzado el
-                // usuario se quedaría sin actualizaciones hasta el siguiente arranque. Se
-                // reintenta contra la copia en caché del Worker antes de rendirse.
-                if (result.status != 200) {
-                    FetchResult mirror = fetchLatestRelease(client, MIRROR_API_LATEST);
-                    if (mirror.status == 200) {
-                        result = mirror;
-                    } else {
+                // Override de pruebas: si hay un manifest apuntado, es la ÚNICA fuente. Se decide
+                // antes de abrir cualquier conexión: si no, se gastaría cuota de la API
+                // (y se dependería de GitHub) justo cuando se quiere probar sin red.
+                String override = manifestOverride();
+                FetchResult result;
+                if (override != null) {
+                    result = fetchLatestRelease(client, override);
+                    if (result.status != 200) {
                         if (listener != null) listener.onCheckError(checkErrorMessage(result.status));
                         return;
+                    }
+                } else {
+                    result = fetchLatestRelease(client, GITHUB_API_LATEST);
+
+                    if (result.status != 200) {
+                        // GitHub limita a 60 peticiones/hora sin token: con el límite alcanzado
+                        // el usuario se quedaría sin actualizaciones hasta el siguiente
+                        // arranque. Se reintenta contra la copia en caché del Worker antes de
+                        // rendirse.
+                        FetchResult mirror = fetchLatestRelease(client, MIRROR_API_LATEST);
+                        if (mirror.status == 200) {
+                            result = mirror;
+                        } else {
+                            if (listener != null) listener.onCheckError(checkErrorMessage(result.status));
+                            return;
+                        }
                     }
                 }
 
@@ -381,13 +415,57 @@ public final class AutoUpdateService {
             // que el próximo arranque no vuelva a ofrecer la misma actualización.
             String v = pendingVersion;
             if (v != null && !v.isBlank()) {
-                updateState().markInstalled(v);
+                recordInstallLaunched(v);
                 pendingVersion = null;
             }
 
             installing.set(false);
             exitAppSoon();
         }, "meacore-update-install").start();
+    }
+
+    /**
+     * Deja constancia de que el instalador de {@code version} se lanzó, sin saber todavía si
+     * terminó bien (el launcher se cierra justo después).
+     *
+     * <p>Se guarda como pendiente de verificar y a la vez como instalada: la segunda marca es
+     * la que evita que el check del siguiente arranque vuelva a ofrecer la misma versión, y el
+     * aviso de "no se completó" lo pone {@link #resolvePendingInstallOnStartup} comparando
+     * con la versión real.</p>
+     *
+     * <p>Existe como método aparte porque {@code installFromPath} llama a {@code System.exit}:
+     * inlining aquí dentro lo haría imposible de testear.</p>
+     */
+    static void recordInstallLaunched(String version) {
+        UpdateState state = updateState();
+        state.markInstallPending(version);
+        state.markInstalled(version);
+    }
+
+    /**
+     * Resuelve la instalación pendiente del arranque anterior y avisa por el listener si
+     * falló, para que la UI ofrezca la descarga manual en vez de dejar al usuario creyendo
+     * que está actualizado.
+     *
+     * <p>Ambas versiones se normalizan con {@link SemVer} antes de comparar: el destino se
+     * guarda como "1.6.2" pero la versión local puede llegar como "v1.6.2" (de la etiqueta de
+     * la UI) y una comparación de cadenas daría siempre FAILED.</p>
+     *
+     * @return qué pasó con la instalación pendiente.
+     */
+    public static UpdateState.InstallOutcome resolvePendingInstallOnStartup(String currentVersion) {
+        SemVer current = SemVer.parse(currentVersion);
+        SemVer target = SemVer.parse(updateState().pendingInstall());
+
+        UpdateState.InstallOutcome outcome = updateState().resolvePendingInstall(current.normalized());
+        if (outcome == UpdateState.InstallOutcome.FAILED && listener != null) {
+            listener.onInstallIncomplete();
+        }
+        // Caso que no debería ocurrir: había destino pero no se pudo parsear como versión.
+        if (outcome != UpdateState.InstallOutcome.NONE && !target.isValid()) {
+            System.err.println("[update] destino de instalación ilegible: " + currentVersion);
+        }
+        return outcome;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -704,6 +782,32 @@ public final class AutoUpdateService {
                           System.getProperty("java.io.tmpdir")), "MeaCore", "updates")
                 : Path.of(System.getProperty("user.home"), ".cache", "meacore", "updates");
     }
+
+    /**
+     * URL del manifest de pruebas, o null si no hay override válido.
+ * <p>Solo se acepta http/https: un valor mal escrito (una ruta local, un typo) se ignora en
+ * lugar de romper el check, y el launcher sigue funcionando con sus fuentes normales.</p>
+ */
+static String manifestOverride() {
+    String raw = System.getProperty(MANIFEST_OVERRIDE_PROPERTY);
+    if (raw == null || raw.isBlank()) {
+        raw = System.getenv(MANIFEST_OVERRIDE_ENV);
+    }
+    if (raw == null || raw.isBlank()) {
+        return null;
+    }
+    String url = raw.trim();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        System.err.println("[update] override de pruebas ignorado (no es http/https): " + url);
+        return null;
+    }
+    return url;
+}
+
+/** ¿Hay un override de pruebas activo? */
+public static boolean hasManifestOverride() {
+    return manifestOverride() != null;
+}
 
     /** Estado persistente de actualizaciones (best-effort: nunca lanza). */
     private static UpdateState updateState() {

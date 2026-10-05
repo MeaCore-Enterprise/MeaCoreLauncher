@@ -48,12 +48,18 @@ public final class UpdateState {
         public String dismissedVersion = "";
         /** Epoch millis del último check; 0 = nunca. */
         public long lastCheckMillis;
+        /**
+         * Versión destino de una instalación cuyo instalador se lanzó pero cuyo resultado
+         * aún no se sabe. Se borra al arrancar comparando con la versión real.
+         */
+        public String pendingInstall = "";
     }
 
     private final Path file;
     private String installedVersion = "";
     private String dismissedVersion = "";
     private Instant lastCheck = Instant.EPOCH;
+    private String pendingInstall = "";
 
     private UpdateState(Path file) {
         this.file = file;
@@ -67,6 +73,7 @@ public final class UpdateState {
             Data data = M.readValue(in, Data.class);
             state.installedVersion = clean(data.installedVersion);
             state.dismissedVersion = clean(data.dismissedVersion);
+            state.pendingInstall = clean(data.pendingInstall);
             state.lastCheck = data.lastCheckMillis > 0
                     ? Instant.ofEpochMilli(data.lastCheckMillis)
                     : Instant.EPOCH;
@@ -135,6 +142,67 @@ public final class UpdateState {
         save();
     }
 
+    // ── Instalación en curso: se resuelve al siguiente arranque ────────────────────
+
+    /**
+     * Registra que se lanzó el instalador de {@code version} y que aún no se sabe si
+     * terminó bien. El launcher se cierra justo después, así que esta es la única manera
+     * de que el siguiente arranque sepa que hay una instalación sin verificar.
+     */
+    public void markInstallPending(String version) {
+        pendingInstall = clean(version);
+        save();
+    }
+
+    /** Versión destino de la instalación sin verificar, o vacío. */
+    public String pendingInstall() {
+        return pendingInstall;
+    }
+
+    /** ¿Queda alguna instalación lanzada cuyo resultado sigue sin comprobarse? */
+    public boolean hasPendingInstall() {
+        return !pendingInstall.isEmpty();
+    }
+
+    /**
+     * Resuelve la instalación pendiente al arrancar y dice qué pasó.
+     *
+     * @param currentVersion versión real del launcher ahora mismo.
+     * @return qué pasó con esa instalación.
+     */
+    public InstallOutcome resolvePendingInstall(String currentVersion) {
+        String target = pendingInstall;
+        if (target.isEmpty()) {
+            return InstallOutcome.NONE;
+        }
+
+        String current = clean(currentVersion);
+        // Se limpia siempre: si no se limpia, el aviso se repite en cada arranque.
+        pendingInstall = "";
+        save();
+
+        return target.equals(current) ? InstallOutcome.SUCCEEDED : InstallOutcome.FAILED;
+    }
+
+    /** Borra la instalación pendiente sin informar (p. ej. el usuario la canceló). */
+    public void clearPendingInstall() {
+        if (pendingInstall.isEmpty()) {
+            return;
+        }
+        pendingInstall = "";
+        save();
+    }
+
+    /** Resultado de comparar la instalación pendiente con la versión real. */
+    public enum InstallOutcome {
+        /** No había ninguna instalación pendiente. */
+        NONE,
+        /** El launcher ya está en la versión destino: la instalación funcionó. */
+        SUCCEEDED,
+        /** Se lanzó un instalador pero la versión no cambió: falló o se canceló. */
+        FAILED
+    }
+
     /** Registra que se consultó la API, para no repetir el check en cada arranque. */
     public void markChecked(Instant when) {
         lastCheck = when == null ? Instant.EPOCH : when;
@@ -162,6 +230,7 @@ public final class UpdateState {
             Data data = new Data();
             data.installedVersion = installedVersion;
             data.dismissedVersion = dismissedVersion;
+            data.pendingInstall = pendingInstall;
             data.lastCheckMillis = lastCheck.equals(Instant.EPOCH) ? 0L : lastCheck.toEpochMilli();
 
             Files.writeString(tmp, M.writeValueAsString(data), StandardCharsets.UTF_8);

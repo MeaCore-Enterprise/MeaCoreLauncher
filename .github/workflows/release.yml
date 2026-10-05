@@ -63,17 +63,39 @@ jobs:
         shell: pwsh
         run: ./gradlew build --no-daemon -x test
 
-      # jpackage exige una versión numérica con al menos dos componentes (X.Y), así que
-      # los sufijos -alpha/-alfa se quitan igual que en Windows.
+      # Dos versiones, deliberadamente distintas:
+      #
+      #   VERSION      numérica (X.Y.Z), la única que jpackage/Windows admite en --app-version.
+      #   VERSION_FULL tal cual está en version.properties, solo para el NOMBRE del asset,
+      #                de modo que un 1.6.2-rc.1 no se confunda con el 1.6.2 estable.
+      #
+      # El bug que esto arregla: antes se hacía `-replace "-alpha",""`, que en
+      # "1.6.6-alpha1" dejaba "1.6.61" -> se publicaba una versión 1.6.61. Y un sufijo
+      # SemVer legítimo ("-rc", "-beta") no se quitaba, así que pasaba "-rc.1" a
+      # --app-version y el build de Windows fallaba.
       - name: Extract Version
         shell: pwsh
         run: |
           $raw = (Get-Content src/main/resources/version.properties |
                   Select-String "^version=").ToString().Split("=",2)[1].Trim()
-          $clean = $raw -replace "-alpha","" -replace "-alfa","" -replace "-preview",""
-          if ($clean -notmatch "^\d+\.\d+") { $clean = "$clean.0" }
-          "VERSION=$clean" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Launcher version: $clean"
+
+          if ($raw -notmatch '^(\d+(?:\.\d+)*)') {
+            Write-Error "version.properties no empieza por un número: '$raw'"
+            exit 1
+          }
+          $core = $Matches[1]
+
+          # jpackage quiere al menos X.Y y los recursos de versión de Windows son numéricos:
+          # un componente no numérico ("2-rc") se parsea como entero y revienta el build.
+          $parts = @($core.Split('.'))
+          while ($parts.Count -lt 3) { $parts += "0" }
+          $numeric = "$($parts[0]).$($parts[1]).$($parts[2])"
+
+          "VERSION=$numeric"      | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VERSION_FULL=$raw"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "version.properties : $raw"
+          Write-Host "jpackage --app-version: $numeric"
+          Write-Host "nombre del asset      : $raw"
 
       # ── Windows ──────────────────────────────────────────────────────────────
       - name: Convert icon PNG -> ICO
@@ -140,7 +162,7 @@ jobs:
 
           # Nombre estable: es el que busca el AutoUpdateService.
           $exe = Get-ChildItem -Filter "*.exe" -Path build/dist | Select-Object -First 1
-          Rename-Item $exe.FullName "meacore-launcher-$env:VERSION.exe"
+          Rename-Item $exe.FullName "meacore-launcher-$env:VERSION_FULL.exe"
 
       # ── Linux ────────────────────────────────────────────────────────────────
       - name: Install ImageMagick
@@ -203,6 +225,21 @@ jobs:
             echo "StartupWMClass=com.experimento.launcher.LauncherApp"
           } > "$DESKTOP"
           dpkg-deb -b /tmp/debpatch $DEB
+
+      # El nombre del .deb lo deriva jpackage del --app-version numérico, así que un
+      # 1.6.2-rc.1 saldría como meacore-launcher_1.6.2_amd64.deb: indistinguible del
+      # estable. Se renombra DESPUÉS de parchear el .desktop, porque ese paso reescribe
+      # el archivo en $DEB y si se renombra antes dejaría de encontrarlo.
+      - name: Rename .deb with the full version
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if [ "$VERSION" != "$VERSION_FULL" ]; then
+            for f in build/dist/*.deb; do
+              mv "$f" "build/dist/meacore-launcher_${VERSION_FULL}_amd64.deb"
+            done
+          fi
+          ls -lh build/dist
 
       - name: Verify artifact exists
         shell: pwsh

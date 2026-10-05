@@ -272,6 +272,7 @@ pisen.
 | `service.WindowsUpdaterScriptTest` | Exit code del instalador y relanzamiento condicional |
 | `paths.LauncherDirectoriesMigrationTest` | Migración no destructiva de datos del usuario |
 | `service.AutoUpdateServiceIntegrityTest` | SHA-256 incorrecto / ausente / tamaño corto contra un servidor HTTP real |
+| `service.ManifestOverrideTest` | Override de pruebas, `pendingInstall` y aviso de instalación fallida |
 | `workers/report-bug.test.mjs` (`node --test workers/`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
 
 ## Checklist de prueba manual
@@ -349,11 +350,109 @@ cambiar el `.exe`/`.deb` de la release **después** de generar el manifest.
 - [ ] Con SmartScreen / Defender activo, la descarga no queda bloqueada con el mensaje de
       "archivo bloqueado por el antivirus" sin explicación.
 
-### Nota sobre el estado en Windows
+### El estado de la instalación al reiniciar
 
-Al lanzar el instalador, el launcher marca la versión como instalada y se cierra: no puede
-saber si el instalador terminó bien. Si falla, en el siguiente arranque se puede volver a
-ofrecer. Está pendiente resolverlo con un marcador de resultado (§ *Cómo añadir una
-plataforma* → alcance real del refactor).
+El launcher lanza el instalador y se cierra: **no puede saber si terminó bien**. Para no
+dejar el estado a medias se guarda `pendingInstall` en `update-state.json`:
+
+| Momento | Qué ocurre |
+|---|---|
+| Se lanza el instalador | `pendingInstall = <versión destino>` y `installedVersion = <destino>` |
+| Arranque siguiente | Se compara `pendingInstall` con la versión real |
+
+- Si **coinciden** → la instalación funcionó. Se borra `pendingInstall` y no se dice nada.
+- Si **no coinciden** → la instalación falló o el usuario la canceló. Se borra
+  `pendingInstall` (si no, el aviso saldría en cada arranque) y la UI muestra
+  *"La actualización no se completó"* con botón **Descargar manualmente**.
+
+El aviso es necesario por una razón concreta: como la versión destino ya quedó marcada
+como instalada, sin él el usuario creería estar actualizado y no volvería a ver la
+actualización nunca.
+
+La comparación normaliza ambas versiones con `SemVer`, porque la versión local llega como
+`v1.6.2` desde la UI y el destino se guarda como `1.6.2`.
 
 Las pruebas de descarga usan un servidor HTTP local: no dependen de la red.
+
+## Probar el ciclo N → N+1 sin publicar una release
+
+Hay dos formas de probar la actualización sin que nada llegue a los usuarios reales.
+
+### Override del manifest (sin publicar nada)
+
+`AutoUpdateService` acepta un puntero a un `latest.json` concreto, que sustituye a la API
+de GitHub y al Worker:
+
+```bash
+./gradlew run -Dmeacore.update.manifest=http://127.0.0.1:8099/latest.json
+# o por entorno:
+MEACORE_UPDATE_MANIFEST=http://127.0.0.1:8099/latest.json ./gradlew run
+```
+
+El manifest solo necesita la forma que ya entiende el launcher:
+
+```json
+{
+  "tag_name": "v1.6.2",
+  "assets": [
+    {
+      "name": "meacore-launcher-1.6.2.exe",
+      "browser_download_url": "http://127.0.0.1:8099/meacore-launcher-1.6.2.exe",
+      "size": 12345,
+      "digest": "sha256:<sha256sum del .exe>"
+    }
+  ]
+}
+```
+
+Notas:
+
+- Solo se aceptan URLs `http`/`https`. Un valor mal escrito (una ruta local, un typo) se
+  **ignora** y el launcher sigue con sus fuentes normales, en vez de romper el check.
+- Un `digest` incorrecto es el escenario interesante: el launcher rechazará el instalador y
+  ofrecerá la descarga manual, que es justo lo que hay que ver funcionar.
+- Sirve cualquiera de las dos versiones (`.exe` o `.deb`) con un `tag_name` superior al
+  `version.properties` actual.
+
+### Tag de pre-release (probando el CI de verdad)
+
+Para probar el workflow completo, con los dos binarios compilados por GitHub Actions, lo
+correcto es una **rama aparte y una tag pre-release**: `/releases/latest` ignora las
+pre-releases, así que los usuarios siguen viendo la estable.
+
+```bash
+# 1. Nunca sobre Estable: rama de pruebas
+git switch -c ci-test
+sed -i 's/^version=.*/version=1.6.2-rc.1/' src/main/resources/version.properties
+git commit -am "test: 1.6.2-rc.1"
+git push origin ci-test
+git tag v1.6.2-rc.1 && git push origin v1.6.2-rc.1   # esto dispara el workflow
+
+# 2. Comprobar que la RC NO se ofrece a los usuarios
+gh api repos/MeaCore-Enterprise/MeaCoreLauncher/releases/latest -q .tag_name
+#   esperado: v1.6.1   (si sale v1.6.2-rc.1, PARA: se publicó como estable)
+
+# 3. Verificar los hashes de los assets de la RC
+gh release download v1.6.2-rc.1 --clobber
+curl -sL -o lj.json https://github.com/MeaCore-Enterprise/MeaCoreLauncher/releases/download/v1.6.2-rc.1/latest.json
+python3 -c "
+import json,hashlib,os
+m=json.load(open('lj.json'))
+for a in m['assets']:
+    h='sha256:'+hashlib.sha256(open(a['name'],'rb').read()).hexdigest()
+    print('OK ' if h==a['digest'] and os.path.getsize(a['name'])==a['size'] else 'MAL', a['name'])
+"
+
+# 4. Limpieza: borrar la RC y la rama
+gh release delete v1.6.2-rc.1 --yes --cleanup-tag
+git push origin :refs/tags/v1.6.2-rc.1
+git push origin --delete ci-test
+git switch Estable
+```
+
+El paso 4 no es opcional: sin él, la tag y el draft se quedan ahí y el próximo que haga un
+release se los encuentra.
+
+> `scripts/is-prerelease-tag.sh` decide si la tag se publica como pre-release. El paso
+> *Verify both installers are attached* vuelve a comprobarlo y **falla el workflow** si una
+> RC quedara como estable, así que un error aquí no llega a los usuarios: rompe el CI.
