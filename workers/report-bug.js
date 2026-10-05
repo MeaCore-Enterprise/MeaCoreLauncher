@@ -160,19 +160,98 @@ export default {
 
     // ── Latest release con caché ──────────────────────────────────
     if (url.pathname === "/api/latest-release") {
-      const cacheKey = new Request("https://api.github.com/repos/MeaCore-Enterprise/MeaCoreLauncher/releases/latest", request);
+      if (request.method === "POST") {
+        return json(405, { error: "Método no permitido" });
+      }
+
+      const repo = env.GITHUB_REPO || "MeaCore-Enterprise/MeaCoreLauncher";
+
+      // Fuente principal: latest.json, que publica el propio CI como asset de la release.
+      // La URL /releases/latest/download/ NO consume la cuota de la API de GitHub, así que
+      // este endpoint sigue answering aunque el launcher haya agotado sus 60 peticiones/hora
+      // o GitHub esté limitando al edge. El SHA-256 lo calculó el CI sobre el binario real.
+      const manifestUrl = `https://github.com/${repo}/releases/latest/download/latest.json`;
+      const cacheKey = new Request(manifestUrl, request);
+
       const cached = await caches.default.match(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        const h = new Headers(cached.headers);
+        h.set("X-Cache", "HIT");
+        return new Response(cached.body, { status: cached.status, headers: h });
+      }
 
-      const ghRes = await fetch("https://api.github.com/repos/MeaCore-Enterprise/MeaCoreLauncher/releases/latest", {
-        headers: { Accept: "application/vnd.github.v3+json", "User-Agent": "MeaCoreLauncher-Website" }
-      });
-      if (!ghRes.ok) return json(502, { error: "GitHub API no disponible" });
+      const headers = { Accept: "application/json", "User-Agent": "MeaCoreLauncher-Website" };
+      // Token opcional: solo si alguien lo configura. latest.json NO lo necesita.
+      if (env.GITHUB_READ_TOKEN) {
+        headers.Authorization = `Bearer ${env.GITHUB_READ_TOKEN}`;
+      }
 
-      const data = await ghRes.json();
-      const response = json(200, {
-        tag_name: data.tag_name,
-        assets: (data.assets || []).map(a => ({ name: a.name, browser_download_url: a.browser_download_url }))
+      let upstream = await fetch(manifestUrl, { headers });
+
+      // Releases anteriores a latest.json: se cae a la API para no dejar de responder.
+      if (upstream.status === 404) {
+        const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+        upstream = await fetch(apiUrl, {
+          headers: { Accept: "application/vnd.github.v3+json", ...headers }
+        });
+        if (!upstream.ok) {
+          return json(upstream.status === 403 || upstream.status === 429 ? 429 : 502, {
+            error: "GitHub API no disponible",
+            status: upstream.status
+          });
+        }
+
+        const data = await upstream.json();
+        const response = new Response(JSON.stringify({
+          tag_name: data.tag_name,
+          name: data.name,
+          html_url: data.html_url,
+          published_at: data.published_at,
+          // digest y size son imprescindibles: sin digest el launcher no puede verificar el
+          // instalador y se niega a instalarlo automáticamente.
+          assets: (data.assets || []).map(a => ({
+            name: a.name,
+            browser_download_url: a.browser_download_url,
+            size: a.size,
+            digest: a.digest || null
+          }))
+        }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "public, max-age=300, must-revalidate",
+            "X-Source": "api"
+          }
+        });
+        ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+        return response;
+      }
+
+      if (!upstream.ok) {
+        return json(upstream.status === 403 || upstream.status === 429 ? 429 : 502, {
+          error: "GitHub no disponible",
+          status: upstream.status
+        });
+      }
+
+      // latest.json ya viene con la forma que el launcher espera (tag_name + assets con
+      // name, browser_download_url, size y digest): se reenvía tal cual, validando que
+      // trae al menos un asset para no cachear un manifest vacío por error.
+      const manifest = await upstream.json();
+      if (!manifest || !Array.isArray(manifest.assets) || manifest.assets.length === 0) {
+        return json(502, { error: "latest.json sin assets" });
+      }
+
+      const response = new Response(JSON.stringify(manifest), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          // TTL corto: una release publicada debe verse rápido, pero el respaldo no debe
+          // servir datos de hace horas si el launcher consulta en ese momento.
+          "Cache-Control": "public, max-age=300, must-revalidate",
+          "X-Source": "latest.json",
+          "X-Cache": "MISS"
+        }
       });
       ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
       return response;

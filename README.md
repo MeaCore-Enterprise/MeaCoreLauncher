@@ -18,6 +18,7 @@ Este repositorio utiliza un flujo de trabajo dinámico para garantizar la estabi
 
 - **Rama `Estable`**: Versiones de producción validadas y listas para jugar. El motor gráfico está construido en JavaFX 21. 
 - **CI/CD Automatizado**: Los instaladores nativos se generan automáticamente bajo etiquetas `bat-*`, sincronizando el nombre del archivo con la versión real del proyecto.
+- **🔄 Auto-actualización Verificada**: Consulta las releases en segundo plano, descarga a un archivo temporal y solo instala si el SHA-256 coincide con el publicado por GitHub. Documentación completa en [`docs/UPDATES.md`](docs/UPDATES.md).
 
 ---
 
