@@ -257,6 +257,23 @@ ID y su fecha de publicación.
 `fail-fast: false` y `concurrency` por etiqueta evitan que dos builds del mismo tag se
 pisen.
 
+### Tareas de mantenimiento del CI
+
+Deprecaciones detectadas el 2026-10-08 al validar la RC `v1.6.2-rc.1` (aviso del propio
+runner de GitHub Actions). **Migrar antes del 19 de octubre de 2026**:
+
+- `actions/setup-java@v4` → `@v5`: deja de recibir actualizaciones y ya avisa del fin de
+  soporte. Es un cambio de una línea en `release.yml`.
+- `actions/checkout@v4`, `actions/upload-artifact@v4` y `actions/download-artifact@v4`:
+  corren con Node 20 y GitHub los fuerza a Node 24. La siguiente versión mayor que retire
+  Node 20 romperá el workflow sin migrar.
+- La etiqueta `ubuntu-latest` migrará a **Ubuntu 26** el 19/10/2026. Revisar que el build
+  no depende de versiones concretas de paquetes de Ubuntu 24.04.
+
+Pasos: `sed -i 's|@v4|@v5|g' .github/workflows/release.yml` (los tres `actions/*`) y el
+`setup-java` a mano. Validar primero con una tag pre-release (como al probar la RC) y
+nunca empujar `Estable` sin pasar la checklist manual.
+
 ## Tests
 
 ```
@@ -273,7 +290,7 @@ pisen.
 | `paths.LauncherDirectoriesMigrationTest` | Migración no destructiva de datos del usuario |
 | `service.AutoUpdateServiceIntegrityTest` | SHA-256 incorrecto / ausente / tamaño corto contra un servidor HTTP real |
 | `service.ManifestOverrideTest` | Override de pruebas, `pendingInstall` y aviso de instalación fallida |
-| `workers/report-bug.test.mjs` (`node --test workers/`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
+| `workers/report-bug.test.mjs` (`node --test workers/report-bug.test.mjs`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
 
 ## Checklist de prueba manual
 
@@ -407,6 +424,13 @@ El manifest solo necesita la forma que ya entiende el launcher:
 
 Notas:
 
+- `-D` y entorno son equivalentes: `build.gradle.kts` copia `meacore.update.manifest` a la
+  JVM forked, así que `./gradlew run -Dmeacore.update.manifest=...` funciona igual que
+  `MEACORE_UPDATE_MANIFEST=... ./gradlew run`. Como alternativa, cualquier opción de línea
+  de comandos se puede poner como `org.gradle.jvmargs` o como variable de entorno.
+- Apuntar el override al `latest.json` de una **pre-release real** de GitHub funciona sin
+  servidor local: el launcher usa el `tag_name` y los `browser_download_url` del manifest
+  tal cual.
 - Solo se aceptan URLs `http`/`https`. Un valor mal escrito (una ruta local, un typo) se
   **ignora** y el launcher sigue con sus fuentes normales, en vez de romper el check.
 - Un `digest` incorrecto es el escenario interesante: el launcher rechazará el instalador y

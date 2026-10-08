@@ -56,6 +56,10 @@ tasks.withType<JavaExec> {
             "-Djdk.gtk.wm_class=meacorelauncher"
         )
     }
+    val manifestOverride = System.getProperty("meacore.update.manifest")
+    if (!manifestOverride.isNullOrBlank()) {
+        systemProperty("meacore.update.manifest", manifestOverride)
+    }
 }
 
 tasks.test {
