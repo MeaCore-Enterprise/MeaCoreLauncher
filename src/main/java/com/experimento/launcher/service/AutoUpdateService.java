@@ -173,9 +173,7 @@ public final class AutoUpdateService {
 
         Thread t = new Thread(() -> {
             try {
-                HttpClient client = HttpClient.newBuilder()
-                        .connectTimeout(Duration.ofSeconds(10))
-                        .build();
+                HttpClient client = newCheckClient();
 
                 // Override de pruebas: si hay un manifest apuntado, es la ÚNICA fuente. Se decide
                 // antes de abrir cualquier conexión: si no, se gastaría cuota de la API
@@ -386,6 +384,7 @@ public final class AutoUpdateService {
                     try { Files.deleteIfExists(dest); } catch (Exception ignored) {}
                     try { Files.deleteIfExists(HttpFiles.partPathFor(dest)); } catch (Exception ignored) {}
                 }
+                System.err.println("[update] fallo al descargar/instalar la actualización: " + ex);
                 if (listener != null) listener.onDownloadError(humanizeError(ex));
             } finally {
                 downloading.set(false);
@@ -694,6 +693,9 @@ public final class AutoUpdateService {
         if (msg.contains("SHA1 mismatch") || msg.contains("SHA256 mismatch")) {
             return "El archivo descargado está corrupto. Intenta de nuevo.";
         }
+        if (msg.startsWith("HTTP ")) {
+            return "No se pudo descargar la actualización. Verifica tu conexión e inténtalo de nuevo.";
+        }
         if (msg.contains("vacío")) {
             return "Se descargó un archivo vacío. Verifica tu conexión e intenta de nuevo.";
         }
@@ -703,8 +705,10 @@ public final class AutoUpdateService {
     /**
      * Convierte el estado HTTP de la API de GitHub en un mensaje accionable en español.
      * 403/429 son el límite de peticiones de la API sin autenticar: no es un error del usuario.
+     * El código concreto solo va al log, nunca al usuario.
      */
     private static String checkErrorMessage(int status) {
+        System.err.println("[update] comprobación de actualizaciones rechazada por el servidor (HTTP " + status + ")");
         if (status <= 0) {
             return "Sin conexión con GitHub. Revisa tu red e inténtalo de nuevo.";
         }
@@ -717,7 +721,16 @@ public final class AutoUpdateService {
         if (status >= 500) {
             return "GitHub está teniendo problemas en este momento. Intenta más tarde.";
         }
-        return "No se pudo comprobar si hay actualizaciones (código " + status + ").";
+        return "No se pudo comprobar si hay actualizaciones. Inténtalo de nuevo.";
+    }
+
+    /** Cliente del check de actualizaciones. API, mirror y override redirigen (302 al CDN o al
+     * tag concreto de GitHub): sin followRedirects(ALWAYS) el check falla con "código 302". */
+    static HttpClient newCheckClient() {
+        return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.ALWAYS)
+                .build();
     }
 
     /** Respuesta de una consulta a la API de releases. */

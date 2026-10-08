@@ -219,7 +219,17 @@ class AutoUpdateServiceTest {
         assertTrue(callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 404).contains("versión publicada"));
         assertTrue(callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 503).contains("problemas"));
         assertTrue(callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 500).contains("problemas"));
-        assertTrue(callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 418).contains("418"));
+        // Un estado raro (418, o lo que fuera antes el 302 de una redirección): mensaje
+        // amable sin filtrar el código HTTP crudo al usuario.
+        String odd = callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 418);
+        assertFalse(odd.contains("418"), odd);
+        assertTrue(odd.contains("actualizaciones"), odd);
+
+        // Regresión del 302: las redirecciones de GitHub/CDN no deben llegar nunca a este
+        // mensaje, y si un servidor responde un 302 sin seguir, tampoco se muestra el código.
+        String redirect = callPrivate("checkErrorMessage", new Class<?>[]{int.class}, 302);
+        assertFalse(redirect.contains("302"), redirect);
+        assertTrue(redirect.contains("actualizaciones"), redirect);
     }
 
     /** Sin red no se muestra un "código 0" al usuario. */

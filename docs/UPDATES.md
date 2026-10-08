@@ -289,6 +289,7 @@ nunca empujar `Estable` sin pasar la checklist manual.
 | `service.WindowsUpdaterScriptTest` | Exit code del instalador y relanzamiento condicional |
 | `paths.LauncherDirectoriesMigrationTest` | Migración no destructiva de datos del usuario |
 | `service.AutoUpdateServiceIntegrityTest` | SHA-256 incorrecto / ausente / tamaño corto contra un servidor HTTP real |
+| `service.HttpRedirectFollowTest` | Regresión del 302 → 200: manifest (override), API y descarga del instalador; integridad y `.part` tras redirección |
 | `service.ManifestOverrideTest` | Override de pruebas, `pendingInstall` y aviso de instalación fallida |
 | `workers/report-bug.test.mjs` (`node --test workers/report-bug.test.mjs`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
 
