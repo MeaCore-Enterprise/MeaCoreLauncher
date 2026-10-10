@@ -176,6 +176,11 @@ Los datos del usuario van a `$XDG_DATA_HOME/MeaCoreLauncher` o `~/.local/share/M
 separados de `/opt/meacore-launcher`. Al arrancar se copian (nunca se mueven) los datos que
 estuvieran en `/opt/meacore-launcher/launcher-data`, verificando cada archivo por tamaño.
 
+La instalación se espera de forma activa (máx. 5 min): se lee la salida del instalador y, si no
+termina a tiempo, se matan sus procesos y la UI ofrece la descarga manual en lugar de quedarse en
+"Instalando..." para siempre. El detalle de cada intento (comando exacto, resultado y salida del
+instalador) se guarda en `update.log` dentro de la carpeta de actualizaciones.
+
 ## Cómo añadir una plataforma
 
 Añadir un sistema nuevo toca cuatro sitios. El launcher **no** necesita recompilarse por
@@ -291,6 +296,7 @@ nunca empujar `Estable` sin pasar la checklist manual.
 | `service.AutoUpdateServiceIntegrityTest` | SHA-256 incorrecto / ausente / tamaño corto contra un servidor HTTP real |
 | `service.HttpRedirectFollowTest` | Regresión del 302 → 200: manifest (override), API y descarga del instalador; integridad y `.part` tras redirección |
 | `service.ManifestOverrideTest` | Override de pruebas, `pendingInstall` y aviso de instalación fallida |
+| `service.InstallerRunTest` | Instalador falso: no arranca / se cuelga / exit code ≠ 0 — la UI recibe el fallo, la guarda se libera y `update.log` guarda comando, resultado y salida |
 | `workers/report-bug.test.mjs` (`node --test workers/report-bug.test.mjs`) | Precedencia `latest.json` → API, rate limit, caché, manifest inválido |
 
 ## Checklist de prueba manual

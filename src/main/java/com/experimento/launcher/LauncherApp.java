@@ -412,6 +412,26 @@ public class LauncherApp extends Application {
             }
 
             @Override
+            public void onInstallFailed(String message) {
+                // La instalación ya lanzada falló en esta sesión (no arrancó, timeout o exit
+                // code != 0). Igual que onInstallIncomplete: botón habilitado + descarga manual.
+                // Sin esto, el botón se quedaba en "Instalando..." deshabilitado para siempre.
+                Platform.runLater(() -> {
+                    downloadedInstaller = null;
+                    updateProgress.setProgress(0);
+                    updateStatus.setText("⚠ " + message);
+                    updateBanner.setVisible(true);
+                    updateBanner.setManaged(true);
+                    updateBanner.setStyle(UPDATE_BANNER_ERROR_STYLE);
+                    updateBtn.setText("Descargar manualmente");
+                    updateBtn.setDisable(false);
+                    updateBtn.setOnAction(ev -> openPendingDownloadInBrowser());
+                    setSidebarVersion(getCurrentVersionLabel());
+                    log("⚠ La instalación falló; se ofrece descarga manual.");
+                });
+            }
+
+            @Override
             public void onCheckError(String message) {
                 // Fallo de COMPROBACIÓN (no de descarga): se avisa sin tocar el botón
                 // "Reiniciar Ahora", que no está en juego aquí. El texto y el estado del

@@ -15,8 +15,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -92,6 +95,26 @@ public final class AutoUpdateService {
     // update-state.json para que reiniciar el launcher no gaste una petición de GitHub cada vez.
     private static final Duration CHECK_COOLDOWN = Duration.ofHours(1);
 
+    /** Cuánto esperar al instalador en Linux antes de matarlo y ofrecer la descarga manual. */
+    private static final long INSTALL_TIMEOUT_SECONDS = 300;
+
+    /** Log de instalación en <updatesDir>/update.log. */
+    private static final String LOG_FILE = "update.log";
+
+    /**
+     * Seam para lanzar el proceso del instalador: en producción usa {@link ProcessBuilder}, y
+     * en los tests un fake que simula un instalador que no arranca, se cuelga o devuelve error.
+     */
+    interface ProcessLauncher {
+        Process start(List<String> command) throws Exception;
+    }
+
+    private static volatile ProcessLauncher processLauncher = command -> new ProcessBuilder(command).start();
+
+    static void setProcessLauncher(ProcessLauncher launcher) {
+        processLauncher = launcher;
+    }
+
     /**
      * Eventos del ciclo de actualización. Los errores de COMPROBACIÓN ({@link #onCheckError})
      * van separados de los de DESCARGA/INSTALACIÓN ({@link #onDownloadError}) porque su
@@ -119,6 +142,13 @@ public final class AutoUpdateService {
          * versión ya está marcada como instalada y no se volverá a ofrecer sola.
          */
         default void onInstallIncomplete() {}
+
+        /**
+         * La instalación del instalador ya descargado falló en esta misma sesión: no arrancó,
+         * se colgó (timeout) o el instalador devolvió error. La UI debe ofrecer la descarga
+         * manual y dejar el botón habilitado, y el servicio NO debe cerrar el launcher.
+         */
+        default void onInstallFailed(String message) {}
 
         /** Fallo al COMPROBAR si hay actualizaciones (red, API, rate limit). */
         default void onCheckError(String message) {}
@@ -403,23 +433,50 @@ public final class AutoUpdateService {
      * solo si el proceso del instalador arrancó bien: si falla, el usuario puede reintentar.
      */
     public static void installFromPath(Path installerPath) {
+        installFromPath(installerPath, INSTALL_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * Lanza el instalador y relanza el launcher. La versión queda registrada como instalada
+     * solo si el instalador termina bien.
+     *
+     * <p>Garantías contra quedarse atascado en "Instalando...":
+     * el comando se ejecuta con timeout, se captura su salida, se comprueba su exit code, y
+     * CUALQUIER excepción del hilo resetea la UI y deja la guarda libre.
+     *
+     * @param timeoutSeconds cuánto esperar al instalador antes de matarlo (Linux); en Windows
+     *                       el script es asíncrono y este valor no se usa.
+     */
+    static void installFromPath(Path installerPath, long timeoutSeconds) {
         if (!installing.compareAndSet(false, true)) return;
         new Thread(() -> {
-            if (!launchInstallerProcess(installerPath, isWindows())) {
+            try {
+                long t0 = System.currentTimeMillis();
+                boolean launched = launchInstallerProcess(installerPath, isWindows(), timeoutSeconds);
+                if (!launched) {
+                    return; // launchInstallerProcess ya notificó a la UI.
+                }
+
+                // Instalador en marcha (Windows) o instalación verificada (Linux): registrar la
+                // versión ANTES de cerrar el launcher para que el próximo arranque no vuelva a
+                // ofrecer la misma actualización.
+                String v = pendingVersion;
+                if (v != null && !v.isBlank()) {
+                    recordInstallLaunched(v);
+                    pendingVersion = null;
+                }
+                appendLog("instalación lista tras " + (System.currentTimeMillis() - t0) + " ms; cerrando para relanzar");
+                exitAppSoon(isWindows() ? null : relaunchCommand());
+            } catch (Throwable t) {
+                // Red de seguridad: ni una excepción inesperada puede dejar la UI en
+                // "Instalando..." para siempre.
+                appendLog("excepción inesperada en el hilo de instalación: " + t);
+                if (listener != null) {
+                    listener.onInstallFailed("La instalación falló de forma inesperada. Reintenta o descárgala manualmente.");
+                }
+            } finally {
                 installing.set(false);
-                return;
             }
-
-            // Instalador en marcha: registrar la versión ANTES de cerrar el launcher para
-            // que el próximo arranque no vuelva a ofrecer la misma actualización.
-            String v = pendingVersion;
-            if (v != null && !v.isBlank()) {
-                recordInstallLaunched(v);
-                pendingVersion = null;
-            }
-
-            installing.set(false);
-            exitAppSoon();
         }, "meacore-update-install").start();
     }
 
@@ -540,14 +597,12 @@ public final class AutoUpdateService {
      * lanza desacoplado. NO cierra el launcher: eso lo hace installFromPath() solo si el
      * proceso arrancó bien, para poder marcar la versión como instalada antes de morir.
  *
-     * @return true si el instalador quedó en marcha.
+     * @return true si el instalador quedó en marcha (o terminó bien en Linux).
      */
-    private static boolean launchInstallerProcess(Path installerPath, boolean isWindows) {
+    private static boolean launchInstallerProcess(Path installerPath, boolean isWindows, long timeoutSeconds) {
         try {
             if (!Files.exists(installerPath)) {
-                if (listener != null) {
-                    listener.onDownloadError("El instalador ya no está en disco. Pulsa 'Buscar Actualizaciones' para descargarlo de nuevo.");
-                }
+                notifyInstallFailure("El instalador ya no está en disco. Pulsa 'Buscar Actualizaciones' para descargarlo de nuevo.");
                 return false;
             }
 
@@ -564,53 +619,206 @@ public final class AutoUpdateService {
 
                 // El script se abre en su propia ventana para que el usuario vea el progreso.
                 // Se devuelve el proceso ya: el launcher cierra después de registrar la versión.
-                new ProcessBuilder(
+                processLauncher.start(List.of(
                         "cmd", "/c", "start", "\"MeaCore Updater\"",
-                        "\"" + batFile.toAbsolutePath() + "\"")
-                        .start();
-
-            } else {
-                // Linux: detect package manager and elevation tool, then install & relaunch
-                String currentExe = ProcessHandle.current().info().command().orElse("/opt/meacore-launcher/bin/MeaCore Launcher");
-                String pmCmd;
-                if (Files.exists(Path.of("/usr/bin/apt"))) {
-                    pmCmd = "apt install";
-                } else if (Files.exists(Path.of("/usr/bin/dnf"))) {
-                    pmCmd = "dnf install";
-                } else {
-                    pmCmd = "dpkg -i";
-                }
-
-                // pkexec muestra un diálogo gráfico de PolicyKit y no necesita TTY ni
-                // contraseña en sudoers → funciona desde el launcher sin consola.
-                // Fallback a sudo para sistemas sin PolicyKit.
-                String elevate = Files.exists(Path.of("/usr/bin/pkexec")) ? "pkexec" : "sudo";
-
-                boolean useY = !pmCmd.equals("dpkg -i");
-                String installCmd = String.format(
-                        "sleep 2 && %s %s %s\"%s\" 2>&1",
-                        elevate, pmCmd, useY ? "-y " : "", absPath);
-                String cmd = installCmd + " && (nohup \"" + currentExe + "\" > /dev/null 2>&1 &)";
-                new ProcessBuilder("bash", "-c", cmd).start();
+                        "\"" + batFile.toAbsolutePath() + "\""));
+                appendLog("comando: cmd /c start \"MeaCore Updater\" \"" + batFile + "\"");
+                return true;
             }
 
-            return true;
+            // Linux: elevar + gestor de paquetes, ejecución monitorizada (timeout, salida, exit code).
+            List<String> command = linuxInstallCommand(installerPath);
+            appendLog("comando: " + String.join(" ", command));
+
+            StringBuilder output = new StringBuilder();
+            InstallToolOutcome outcome =
+                    runElevatedCommand(command, processLauncher, timeoutSeconds, output);
+
+            appendLog("salida del instalador:\n" + trimToLast(output.toString(), 6000));
+            appendLog("resultado: " + outcome.result + " (exit " + outcome.exitCode + ")");
+
+            switch (outcome.result) {
+                case SUCCESS:
+                    return true;
+                case TIMEOUT:
+                    notifyInstallFailure("La instalación no terminó a tiempo (es posible que la autorización o la instalación se hayan quedado colgadas). Reintenta o descárgala manualmente.");
+                    return false;
+                case FAILED:
+                    notifyInstallFailure("El instalador terminó con error (código " + outcome.exitCode + "). Revisa el log y reintenta, o descárgalo manualmente.");
+                    return false;
+                default:
+                    notifyInstallFailure("No se pudo lanzar la instalación. Revisa tu conexión y reintenta, o descárgala manualmente.");
+                    return false;
+            }
 
         } catch (Exception e) {
             // No cerramos el launcher si la elevación/instalación falló:
             // el usuario necesita feedback y poder reintentar.
-            if (listener != null) {
-                listener.onDownloadError("No se pudo lanzar la instalación: " + e.getMessage());
-            }
+            appendLog("error al lanzar la instalación: " + e);
+            notifyInstallFailure("No se pudo lanzar la instalación. Reintenta o descárgala manualmente.");
             return false;
         }
     }
 
+    /** Aviso a la UI de un fallo de instalación y detalle al log. */
+    private static void notifyInstallFailure(String message) {
+        if (listener != null) {
+            listener.onInstallFailed(message);
+        }
+    }
+
+    /** Resultado de ejecutar un comando elevado. */
+    enum InstallResult { SUCCESS, FAILED, TIMEOUT, NOT_STARTED }
+
+    /** Salida de {@link #runElevatedCommand}: estado final y exit code del instalador. */
+    record InstallToolOutcome(InstallResult result, int exitCode) {
+        static InstallToolOutcome of(InstallResult r) {
+            return new InstallToolOutcome(r, -1);
+        }
+    }
+
     /**
-     * Cierra el launcher dejando que el instalador se haga cargo del proceso.
-     * 2000ms para que el proceso hijo se desacople completamente.
+     * Comando de instalación elevado: {@code pkexec apt install -y <ruta>} (o dnf/dpkg,
+     * con {@code sudo} como respaldo si no hay PolicyKit). Como lista de argumentos, sin
+     * comillas ni shell: cada ruta va separada de valores válidos.
      */
-    private static void exitAppSoon() {
+    static List<String> linuxInstallCommand(Path installerPath) {
+        List<String> pm;
+        if (Files.exists(Path.of("/usr/bin/apt"))) {
+            pm = List.of("/usr/bin/apt", "install", "-y");
+        } else if (Files.exists(Path.of("/usr/bin/dnf"))) {
+            pm = List.of("/usr/bin/dnf", "install", "-y");
+        } else {
+            pm = List.of("/usr/bin/dpkg", "-i");
+        }
+        String elevate = Files.exists(Path.of("/usr/bin/pkexec")) ? "/usr/bin/pkexec" : "/usr/bin/sudo";
+        List<String> command = new java.util.ArrayList<>(pm.size() + 2);
+        command.add(elevate);
+        command.addAll(pm);
+        command.add(installerPath.toAbsolutePath().toString());
+        return command;
+    }
+
+    /**
+     * Ejecuta el comando elevado con timeout, leyendo su salida mientras corre para que un
+     * instalador verboso no se quede bloqueado escribiendo al pipe (que es justo lo que hace
+     * que el flujo se congele sin que nadie vea nada).
+     *
+     * @return estado final más el exit code real (o -1 si no llegó a terminar).
+     */
+    static InstallToolOutcome runElevatedCommand(List<String> command,
+                                                  ProcessLauncher launcher,
+                                                  long timeoutSeconds,
+                                                  StringBuilder output) {
+        Process process;
+        try {
+            process = launcher.start(command);
+        } catch (Exception e) {
+            output.append("no se pudo arrancar: ").append(e).append('\n');
+            return InstallToolOutcome.of(InstallResult.NOT_STARTED);
+        }
+
+        // Lectura concurrente de stdout y stderr: con 2>&1 el instalador escribe a un solo
+        // sitio, pero se leen ambos por si el proceso elegido no redirige.
+        Thread outReader = ioReader(process, output);
+        Thread errReader = ioReader(process, output);
+
+        boolean finished;
+        try {
+            finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            return InstallToolOutcome.of(InstallResult.TIMEOUT);
+        }
+
+        if (!finished) {
+            output.append("[timeout]: el instalador no terminó en ").append(timeoutSeconds).append("s; se fuerza el cierre\n");
+            process.destroyForcibly();
+            try {
+                process.waitFor(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return InstallToolOutcome.of(InstallResult.TIMEOUT);
+        }
+
+        joinReader(outReader);
+        joinReader(errReader);
+        return new InstallToolOutcome(
+                process.exitValue() == 0 ? InstallResult.SUCCESS : InstallResult.FAILED,
+                process.exitValue());
+    }
+
+    private static Thread ioReader(Process process, StringBuilder output) {
+        Thread t = new Thread(() -> {
+            byte[] buf = new byte[4096];
+            try (InputStream in = process.getInputStream()) {
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    output.append(new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8));
+                }
+            } catch (Exception ignored) {
+                // El proceso puede morir y cerrar el stream mientras leemos.
+            }
+        }, "meacore-install-output");
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private static void joinReader(Thread t) {
+        try {
+            t.join(2000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Con qué ejecutable relanzar el launcher tras una instalación correcta en Linux. */
+    private static String relaunchCommand() {
+        Path packaged = Path.of("/opt/meacore-launcher/bin/MeaCore Launcher");
+        String target;
+        if (Files.exists(packaged)) {
+            target = packaged.toString();
+        } else {
+            target = ProcessHandle.current().info().command().orElse(packaged.toString());
+        }
+        appendLog("relanzamiento con: " + target);
+        return "nohup \"" + target + "\" > /dev/null 2>&1 &";
+    }
+
+    /** Escribe en <updatesDir>/update.log, creándolo si hace falta. Nunca lanza. */
+    private static void appendLog(String message) {
+        try {
+            Path log = updatesDir().resolve(LOG_FILE);
+            Files.createDirectories(log.getParent());
+            String line = "[" + java.time.Instant.now() + "] " + message + System.lineSeparator();
+            Files.writeString(log, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String trimToLast(String s, int max) {
+        if (s.length() <= max) return s;
+        return s.substring(Math.max(0, s.length() - max));
+    }
+
+    /**
+     * Cierra el launcher dejando que el instalador se haga cargo del proceso. Si se pasa un
+     * comando de relanzamiento, se lanza en un hook de apagado: justo después de que la JVM
+     * termine y esté plenamente desacoplada. 2000ms para que el proceso hijo se desacople.
+     */
+    private static void exitAppSoon(String relaunchCommand) {
+        if (relaunchCommand != null && !relaunchCommand.isBlank()) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    new ProcessBuilder("bash", "-c", relaunchCommand).start();
+                } catch (Exception e) {
+                    appendLog("no se pudo relanzar: " + e);
+                }
+            }, "meacore-relaunch"));
+        }
         try {
             Thread.sleep(2000);
         } catch (InterruptedException ignored) {
