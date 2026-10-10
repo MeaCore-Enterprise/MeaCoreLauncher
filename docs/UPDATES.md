@@ -181,6 +181,23 @@ termina a tiempo, se matan sus procesos y la UI ofrece la descarga manual en lug
 "Instalando..." para siempre. El detalle de cada intento (comando exacto, resultado y salida del
 instalador) se guarda en `update.log` dentro de la carpeta de actualizaciones.
 
+### Versión del paquete `.deb` en una RC
+
+El CI fija `--app-version` a la versión **numérica** (`1.6.2`), así que el `.deb` de una RC queda
+registrado en dpkg como `1.6.2` y solo el **nombre del asset** lleva el sufijo (`1.6.2-rc.1`).
+Consecuencia al probar: **hay que desinstalar antes** (`sudo apt remove meacore-launcher` o
+`sudo dpkg -r meacore-launcher`), porque dos builds distintos (RC y estable) comparten la misma
+versión de paquete `1.6.2` y apt rechaza el "mismo" número; sin limpiar, el resultado es confuso.
+
+**¿Puede el `.deb` llevar `1.6.2~rc.1`? Sí.** En Debian el `~` es válido dentro de la versión y
+ordena *antes* que cualquier otro carácter, así que `1.6.2~rc.1 < 1.6.2` (comprobado con `dpkg
+--compare-versions`): el estable se ve como upgrade de la RC y no hace falta desinstalar. Ojo con
+el guion: `1.6.2-rc.1` se interpreta como revisión Debian y ordena *después* (`1.6.2-rc.1 >
+1.6.2`), que es justo lo que no queremos. jpackage 21 acepta el tilde (probado en local:
+`jpackage --app-version "1.6.2~rc.1" --type deb` deja `Version: 1.6.2~rc.1` en el control).
+Adoptarlo exigiría un `--app-version` específico de Linux (sufijo `-` → `~`) manteniendo el
+numérico en Windows, cuyo `.exe`/WiX no admite el sufijo. Mientras no se adopte, desinstalar antes.
+
 ## Cómo añadir una plataforma
 
 Añadir un sistema nuevo toca cuatro sitios. El launcher **no** necesita recompilarse por
@@ -444,6 +461,45 @@ Notas:
   ofrecerá la descarga manual, que es justo lo que hay que ver funcionar.
 - Sirve cualquiera de las dos versiones (`.exe` o `.deb`) con un `tag_name` superior al
   `version.properties` actual.
+
+### Guía rápida: probar una RC en Windows
+
+La vía completa se recorre sobre el launcher **instalado**, no con `gradlew run`: en Windows el
+`.bat` relanza "el ejecutable actual" detectado con `ProcessHandle`, que bajo `gradlew run` es
+`java.exe` (sin argumentos) y no relanza nada de verdad.
+
+1. **Preparación**: máquina/VM con el launcher estable N instalado
+   (`%LOCALAPPDATA%\MeaCore Launcher\MeaCore Launcher.exe` en el default de jpackage con
+   `--win-per-user-install`; con `--win-dir-chooser` puede estar en otra carpeta que hayáis
+   elegido). Juego cerrado y copia de `launcher-data`.
+2. **Override por entorno** (un launcher instalado no recibe `-D`):
+
+   ```powershell
+   $env:MEACORE_UPDATE_MANIFEST = "https://github.com/MeaCore-Enterprise/MeaCoreLauncher/releases/download/v1.6.2-rc.1/latest.json"
+   & "$env:LOCALAPPDATA\MeaCore Launcher\MeaCore Launcher.exe"
+   ```
+
+3. **Qué ver en cada paso**:
+   - Aviso de actualización con `v1.6.2-rc.1` (no `v1.6.2` a secas).
+   - Barra de progreso de la descarga y verificación SHA-256 a lo largo del camino.
+   - Botón **Reiniciar Ahora** (con un juego abierto, bloqueado hasta cerrarlo).
+   - Se cierra el launcher y aparece la ventana "MeaCore Updater": 5 s de espera, instalación,
+     y el launcher se relanza solo.
+4. **Log que revisar**: `start /wait` deja el exit code del instalador en `ERRORLEVEL`. Solo si
+   falla queda `meacore_update.log` junto al `.bat` (carpeta de actualizaciones
+   `%LOCALAPPDATA%\MeaCore\updates\meacore_update.log`) con el código, y el launcher **no** se
+   relanza: el arranque siguiente compara `pendingInstall` y ofrece la descarga manual. El log
+   del servicio (`update.log`) está en esa misma carpeta de `updates`.
+5. **Recorrido con fallo provocado**: matar el instalador o lanzar un `.exe` que no sea
+   instalador → ventana "Actualización terminó con error", `meacore_update.log` junto al `.bat`
+   y, al arrancar de nuevo, el aviso "La actualización no se completó" con botón
+   **Descargar manualmente**.
+
+Para probar solo la mitad previa (aviso, descarga, verificación) desde el repo:
+
+```powershell
+./gradlew.bat run "-Dmeacore.update.manifest=https://github.com/MeaCore-Enterprise/MeaCoreLauncher/releases/download/v1.6.2-rc.1/latest.json"
+```
 
 ### Tag de pre-release (probando el CI de verdad)
 
