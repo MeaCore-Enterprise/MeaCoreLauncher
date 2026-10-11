@@ -31,6 +31,10 @@ public final class VersionMerge {
                 JsonNode existing = out.get("arguments");
                 ObjectNode p = existing != null && existing.isObject() ? (ObjectNode) existing : null;
                 out.set(k, mergeArguments(p, (ObjectNode) v));
+            } else if ("downloads".equals(k) && v.isObject()) {
+                JsonNode existing = out.get("downloads");
+                ObjectNode p = existing != null && existing.isObject() ? (ObjectNode) existing : null;
+                out.set(k, mergeDownloads(p, (ObjectNode) v));
             } else {
                 out.set(k, v);
             }
@@ -38,33 +42,53 @@ public final class VersionMerge {
         return out;
     }
 
-    private static ArrayNode mergeLibraries(JsonNode parentLibs, ArrayNode childLibs) {
-        Map<String, JsonNode> byName = new LinkedHashMap<>();
+    private static ObjectNode mergeDownloads(ObjectNode parentDl, ObjectNode childDl) {
+        if (parentDl == null || parentDl.isNull()) return childDl.deepCopy();
+        if (childDl == null || childDl.isNull()) return parentDl.deepCopy();
+        ObjectNode out = parentDl.deepCopy();
+        childDl.fields().forEachRemaining(e -> out.set(e.getKey(), e.getValue()));
+        return out;
+    }
 
-        // Las librerías del hijo van primero (mayor prioridad en el classpath)
-        // Clave = nombre completo incluyendo versión, para que versiones distintas del mismo
-        // artefacto coexistan (ej: lwjgl:2.9.2 de Forge para macOS + lwjgl:2.9.4 del vanilla para Linux/Windows)
+    private static ArrayNode mergeLibraries(JsonNode parentLibs, ArrayNode childLibs) {
+        // En Minecraft pueden existir multiples librerias con el mismo nombre pero distintas reglas.
+        // Fabric sobreescribe algunas, pero no queremos perder los natives (classifiers).
+        // Usaremos una lista para mantener el orden de Mojang y luego agregar las de Fabric.
+        ArrayNode arr = M.createArrayNode();
+
+        // 1. Map de las librerías del hijo
+        Map<String, JsonNode> childByName = new LinkedHashMap<>();
         for (JsonNode lib : childLibs) {
             String n = lib.path("name").asText("");
             if (!n.isBlank()) {
-                byName.put(n, lib);
+                childByName.put(n, lib);
             } else {
-                byName.put("__anon_" + byName.size(), lib);
+                arr.add(lib); // anon
             }
         }
 
-        // Las librerías del padre se agregan sólo si no están ya presentes con el mismo nombre exacto
+        // 2. Procesar las del padre. Si el hijo la redefine, la fusionamos.
         if (parentLibs != null && parentLibs.isArray()) {
             for (JsonNode lib : parentLibs) {
                 String n = lib.path("name").asText("");
-                if (!n.isBlank() && !byName.containsKey(n)) {
-                    byName.put(n, lib);
+                if (!n.isBlank()) {
+                    if (childByName.containsKey(n)) {
+                        // Mezclar y consumir el hijo
+                        JsonNode merged = merge(lib, childByName.get(n));
+                        arr.add(merged);
+                        childByName.remove(n);
+                    } else {
+                        arr.add(lib);
+                    }
+                } else {
+                    arr.add(lib);
                 }
             }
         }
 
-        ArrayNode arr = M.createArrayNode();
-        byName.values().forEach(arr::add);
+        // 3. Agregar cualquier librería del hijo que no estuviera en el padre
+        childByName.values().forEach(arr::add);
+
         return arr;
     }
 

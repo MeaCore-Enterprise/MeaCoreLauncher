@@ -44,6 +44,7 @@ javafx {
 
 application {
     mainClass.set("com.experimento.launcher.Main")
+    applicationDefaultJvmArgs = listOf("-Xms64m", "-Xmx512m", "-XX:+UseG1GC", "-XX:MaxGCPauseMillis=20", "-XX:+UseStringDeduplication")
 }
 
 tasks.withType<JavaExec> {
@@ -56,6 +57,16 @@ tasks.withType<JavaExec> {
             "-Djdk.gtk.wm_class=meacorelauncher"
         )
     }
+    
+    // Limitar la memoria máxima del Launcher para que no robe RAM a Minecraft
+    jvmArgs(
+        "-Xms64m",
+        "-Xmx512m",
+        "-XX:+UseG1GC",
+        "-XX:MaxGCPauseMillis=20",
+        "-XX:+UseStringDeduplication"
+    )
+    
     val manifestOverride = System.getProperty("meacore.update.manifest")
     if (!manifestOverride.isNullOrBlank()) {
         systemProperty("meacore.update.manifest", manifestOverride)

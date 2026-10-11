@@ -84,10 +84,6 @@ public final class LanFixService {
      */
     public static List<String> getLanArgs() {
         return List.of(
-            // Prefiere IPv4 en DNS pero NO deshabilita IPv6 (a diferencia de preferIPv4Stack)
-            "-Djava.net.preferIPv4Addresses=true",
-            // TTL de multicast: 4 saltos (suficiente para LAN local con switches)
-            "-Dsun.net.inetaddr.ttl=0",
             // Timeout de conexión reducido para LAN (detecta servidores caídos más rápido)
             "-Dsun.net.client.defaultConnectTimeout=5000",
             "-Dsun.net.client.defaultReadTimeout=15000"
@@ -102,8 +98,8 @@ public final class LanFixService {
         return List.of(
             // No usar proxy del sistema (evita interferencia de proxies corporativos)
             "-Djava.net.useSystemProxies=false",
-            // Resolver DNS más rápido
-            "-Dsun.net.inetaddr.ttl=30"
+            // Resolver DNS más rápido (TTL de caché DNS)
+            "-Dnetworkaddress.cache.ttl=30"
         );
     }
 

@@ -78,9 +78,10 @@ public final class JvmPresetService {
                 "-XX:+ParallelRefProcEnabled",
                 "-XX:+DisableExplicitGC",
                 "-XX:+PerfDisableSharedMem",
-                "-XX:+UseLargePages",
+                // No UseLargePages — requiere hugepages configuradas en el kernel
                 "-XX:+TieredCompilation",
-                "-XX:CompileThreshold=1500",
+                // CompileThreshold se ignora con TieredCompilation activo — omitido
+                "-XX:+AlwaysPreTouch",   // Seguro aquí: -Xms=512M, no hay presión al arranque
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -103,7 +104,7 @@ public final class JvmPresetService {
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseG1GC",
-                "-XX:MaxGCPauseMillis=200",         // Pausa realista para no sobrecargar CPU en GC
+                "-XX:MaxGCPauseMillis=50",          // Aikar's Flag (50ms, no 200ms default)
                 "-XX:G1NewSizePercent=20",          // Aikar's Flag
                 "-XX:G1MaxNewSizePercent=60",       // Aikar's Flag
                 "-XX:G1HeapRegionSize=32M",         // Aikar's Flag
@@ -120,10 +121,10 @@ public final class JvmPresetService {
                 "-XX:+PerfDisableSharedMem",
                 "-XX:MaxTenuringThreshold=1",
                 "-XX:+UseNUMA",
-                "-XX:+UseLargePages",
+                // No UseLargePages — requiere hugepages configuradas en el kernel
                 "-XX:SoftRefLRUPolicyMSPerMB=1000",
                 "-XX:+TieredCompilation",
-                "-XX:CompileThreshold=1500",
+                // CompileThreshold se ignora con TieredCompilation activo — omitido
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -153,17 +154,18 @@ public final class JvmPresetService {
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseZGC",
-                "-XX:ZCollectionInterval=8",        // Mejorado: 10→8s
-                "-XX:ZMaxMappingCount=50000",
+                "-XX:+ZGenerational",               // ZGC Generacional (Java 21+; ignorado en < 21)
+                "-XX:ZCollectionInterval=8",        // Recolecta proactivamente cada 8s
+                // ZMaxMappingCount no es una flag documentada del JDK — eliminada
                 "-XX:ZUncommitDelay=600",           // Libera memoria al OS tras 10min sin uso
-                "-XX:SoftRefLRUPolicyMSPerMB=200",  // Más agresivo que antes (500→200)
-                "-XX:+UseLargePages",
+                "-XX:SoftRefLRUPolicyMSPerMB=200",
+                // No UseLargePages — requiere hugepages configuradas en el kernel
                 "-XX:+UseNUMA",
                 "-XX:+DisableExplicitGC",
                 "-XX:+PerfDisableSharedMem",
                 "-XX:+ParallelRefProcEnabled",
                 "-XX:+TieredCompilation",
-                "-XX:CompileThreshold=1500",
+                // CompileThreshold se ignora con TieredCompilation activo — omitido
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -174,7 +176,7 @@ public final class JvmPresetService {
                 "-Xmx" + mx,
                 "-XX:+UnlockExperimentalVMOptions",
                 "-XX:+UseG1GC",
-                "-XX:MaxGCPauseMillis=200",
+                "-XX:MaxGCPauseMillis=50",          // Aikar's Flag
                 "-XX:G1NewSizePercent=20",
                 "-XX:G1MaxNewSizePercent=60",
                 "-XX:G1HeapRegionSize=32M",
@@ -190,11 +192,11 @@ public final class JvmPresetService {
                 "-XX:+DisableExplicitGC",
                 "-XX:+PerfDisableSharedMem",
                 "-XX:+UseNUMA",
-                "-XX:+UseLargePages",
+                // No UseLargePages — requiere hugepages configuradas en el kernel
                 "-XX:MaxTenuringThreshold=1",
                 "-XX:SoftRefLRUPolicyMSPerMB=500",
                 "-XX:+TieredCompilation",
-                "-XX:CompileThreshold=1500",
+                // CompileThreshold se ignora con TieredCompilation activo — omitido
                 "-Dlog4j2.formatMsgNoLookups=true",
                 "-Djdk.nio.maxCachedBufferSize=262144",
                 "-Dfile.encoding=UTF-8",
@@ -226,25 +228,25 @@ public final class JvmPresetService {
             "-Xms" + ms,
             "-Xmx" + mx,
             "-XX:+UnlockExperimentalVMOptions",
-            // ZGC — GC de latencia mínima (<1 ms de pausa garantizada)
+            // ZGC Generacional — GC de latencia mínima (<1 ms de pausa, Java 21+)
             "-XX:+UseZGC",
+            "-XX:+ZGenerational",                   // Activa modo Generacional (ignorado en < Java 21)
             "-XX:ZCollectionInterval=5",            // Recolecta proactivamente cada 5s
-            "-XX:ZMaxMappingCount=100000",           // Más espacio para regiones de memoria
+            // ZMaxMappingCount no es una flag documentada del JDK — eliminada
             "-XX:ZUncommitDelay=300",               // Devuelve RAM al OS si no se usa en 5 min
             "-XX:SoftRefLRUPolicyMSPerMB=50",       // Agresivo con soft refs — menos presión GC
-            // Memoria avanzada
-            "-XX:+UseLargePages",
+            // No UseLargePages — requiere hugepages configuradas en el kernel
             "-XX:+UseNUMA",
             "-XX:+DisableExplicitGC",
             "-XX:+PerfDisableSharedMem",
             "-XX:+ParallelRefProcEnabled",
-            // JIT agresivo — warm-up 6x más rápido que el default (10000)
+            // JIT
             "-XX:+TieredCompilation",
-            "-XX:CompileThreshold=1500",
+            // CompileThreshold se ignora con TieredCompilation activo — omitido
             "-XX:+OptimizeStringConcat",
             // Networking y encoding
             "-Dlog4j2.formatMsgNoLookups=true",
-            "-Djdk.nio.maxCachedBufferSize=524288",  // 512 KB buffer NIO (doble que en HIGH)
+            "-Djdk.nio.maxCachedBufferSize=524288",  // 512 KB buffer NIO
             "-Dfile.encoding=UTF-8",
             "-Dsplash=false"
         ));
@@ -279,6 +281,8 @@ public final class JvmPresetService {
         args.add("-XX:ActiveProcessorCount=" + logicCores);
 
         args.add("-XX:+OptimizeStringConcat");
-        args.add("-XX:+AlwaysPreTouch");
+        // AlwaysPreTouch eliminado de aquí: toca toda la memoria de -Xms al arrancar;
+        // con -Xms grandes (2G+) genera presión inmediata en sistemas con poca RAM libre.
+        // Solo se aplica en lowPreset donde -Xms=512M es seguro.
     }
 }

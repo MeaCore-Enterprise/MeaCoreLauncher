@@ -1545,13 +1545,13 @@ public class LauncherApp extends Application {
                     case "Forge" -> com.experimento.launcher.modloaders.ModloaderVersionService.getForgeVersions(mcVersion);
                     case "Fabric" -> {
                         if (!com.experimento.launcher.modloaders.ModloaderVersionService.isFabricSupported(mcVersion)) {
-                            throw new Exception("Fabric no soporta Minecraft " + mcVersion + ". Usa Forge para versiones antiguas (1.14-).");
+                            yield java.util.List.<String>of();
                         }
                         yield com.experimento.launcher.modloaders.ModloaderVersionService.getFabricLoaderVersions(mcVersion);
                     }
                     case "Quilt" -> {
                         if (!com.experimento.launcher.modloaders.ModloaderVersionService.isQuiltSupported(mcVersion)) {
-                            throw new Exception("Quilt no soporta Minecraft " + mcVersion + ". Usa Forge para versiones antiguas (1.14-).");
+                            yield java.util.List.<String>of();
                         }
                         yield com.experimento.launcher.modloaders.ModloaderVersionService.getQuiltLoaderVersions(mcVersion);
                     }
@@ -1834,13 +1834,22 @@ public class LauncherApp extends Application {
         
         workers.submit(() -> {
             try {
-                com.experimento.launcher.store.StoreDownloader.installSpecificVersion(
-                    currentSelectedStoreItem, version, gameDir,
-                    msg -> Platform.runLater(() -> log(msg)));
-                Platform.runLater(() -> {
-                    log("[Store] ✅ " + currentSelectedStoreItem.title() + " " + version.versionNumber() + " instalado correctamente.");
-                    refreshModList();
-                });
+                com.experimento.launcher.store.ModpackDependencies deps = 
+                    com.experimento.launcher.store.StoreDownloader.installSpecificVersion(
+                        currentSelectedStoreItem, version, gameDir,
+                        msg -> Platform.runLater(() -> log(msg)));
+                
+                if (deps != null) {
+                    Platform.runLater(() -> {
+                        log("[STORE] Modpack requiere " + deps.mcVersion() + " con " + deps.loader() + ". Configurando automáticamente...");
+                        autoConfigureModpack(deps);
+                    });
+                } else {
+                    Platform.runLater(() -> {
+                        log("[Store] ✅ " + currentSelectedStoreItem.title() + " " + version.versionNumber() + " instalado correctamente.");
+                        refreshModList();
+                    });
+                }
             } catch (Exception ex) {
                 Platform.runLater(() -> log("[Store] Error: " + ex.getMessage()));
             }
@@ -1965,6 +1974,14 @@ public class LauncherApp extends Application {
         }
         saveProfiles();
         applyVersionFilter(); // Refresca UI
+        
+        // Pre-actualizar el archivo de aislamiento para que el Protector de Instancia no borre los mods
+        // que acaba de instalar la tienda pensando que son de una versión anterior.
+        try {
+            java.nio.file.Path versionFile = facade.gameDirFor(selected).resolve(".meacore_version");
+            java.nio.file.Files.createDirectories(versionFile.getParent());
+            java.nio.file.Files.writeString(versionFile, match);
+        } catch (Exception ignored) {}
         log("[STORE] ✅ Perfil auto-configurado para: " + match + " | Loader: " + (loader != null ? loader : "vanilla"));
         
         // Si estamos en la vista General, forzar refresco
@@ -2376,8 +2393,8 @@ public class LauncherApp extends Application {
                 
                 updateMessage("Iniciando Minecraft...");
                 long totalRam = com.experimento.launcher.service.HardwareProbe.totalPhysicalRamMiB();
-                // Cap RAM assignment: never allocate more than 75% of physical RAM and never more than 16 GB
-                long ram = Math.min(totalRam * 3 / 4, 16 * 1024L);
+                // Cap RAM assignment: never allocate more than 75% of physical RAM
+                long ram = totalRam * 3 / 4;
                 
                 String pId = selected.id;
                 Process proc = facade.startGame(selected, ram, s -> Platform.runLater(() -> log(s)));

@@ -247,19 +247,46 @@ public final class LauncherFacade {
         }
         Path gameDir = gameDirFor(p);
         List<String> jvm = JvmPresetService.argsFor(p, ramMiB, HardwareProbe.physicalCores(), HardwareProbe.availableProcessors());
-        
-        // Fixes de compatibilidad de módulos para Java 17+
+
+        // --- Cap de -Xmx según la RAM disponible real ---
+        // Evita que presets manuales (ej: ULTRA con -Xmx10G) provoquen swap o OOM killer
+        // en máquinas con poca RAM libre.
+        long availableRamMiB = ramMiB; // fallback
+        try {
+            availableRamMiB = SystemInfoService.getInfo().availableRamBytes() / (1024 * 1024);
+        } catch (Exception ignored) {}
+        long maxSafeHeapMiB = Math.max(512L, (availableRamMiB * 3) / 4);
+        jvm = capHeapArg(jvm, maxSafeHeapMiB);
+
+        // --- Fixes de compatibilidad de módulos para Java 17+ ---
         jvm.add("-Djdk.module.illegalAccess.silent=true");
         jvm.add("-XX:+IgnoreUnrecognizedVMOptions");
         jvm.add("--add-opens=java.base/java.lang=ALL-UNNAMED");
-        
-        // Fix de Red / LAN — separados en LAN (local) + servidores externos (Aternos etc.)
+
+        // --- Fix de Red / LAN ---
         jvm.addAll(LanFixService.getLanArgs());
         jvm.addAll(LanFixService.getServerConnectArgs());
-        
+
         String effectiveJava = p.javaExecutable;
         int requiredVer = getRequiredJavaVersion(merged, versionId);
-        
+
+        // --- Strip de flags ZGC si el juego requiere Java < 11 ---
+        // ZGC es experimental a partir de Java 11 y estable en Java 15.
+        // Con Java 8, las flags ZGC son inválidas y aunque IgnoreUnrecognizedVMOptions
+        // las silencia, se pierde todo el preset de GC (el juego usaría Serial GC).
+        if (requiredVer > 0 && requiredVer < 11) {
+            jvm.removeIf(arg -> arg.contains("+UseZGC")
+                    || arg.contains("ZCollection")
+                    || arg.contains("ZUncommit")
+                    || arg.contains("ZGenerational")
+                    || arg.contains("ZMaxMapping"));
+            // Añadir G1GC si no hay GC explícito después del strip
+            if (jvm.stream().noneMatch(arg -> arg.contains("UseG1GC") || arg.contains("UseParallelGC"))) {
+                jvm.add("-XX:+UseG1GC");
+                jvm.add("-XX:MaxGCPauseMillis=50");
+            }
+        }
+
         // Detección inteligente de la versión de Java requerida si no hay una manual
         if (effectiveJava == null || effectiveJava.isBlank()) {
             if (requiredVer > 0) {
@@ -275,7 +302,7 @@ public final class LauncherFacade {
                         System.err.println("[LAUNCHER] Falló la descarga automática de Java: " + e.getMessage());
                     }
                 }
-                
+
                 // Fallback a Java 17 solo si se solicitaba 21 y la descarga falló
                 if (effectiveJava == null && requiredVer == 21) {
                     portable = runtimeService.getExecutable(17);
@@ -288,11 +315,11 @@ public final class LauncherFacade {
         if (effectiveJava == null || effectiveJava.isBlank() || effectiveJava.equalsIgnoreCase("java")) {
             // Intentar resolver el java del sistema como último recurso
             effectiveJava = com.experimento.launcher.mojang.GameLauncher.resolveJavaBinary();
-            
+
             // Si después de todo sigue siendo solo "java" o nulo, verificar si "java" existe en el PATH
             if (effectiveJava.equalsIgnoreCase("java")) {
                 if (!isJavaInPath()) {
-                    String msg = (requiredVer > 0) 
+                    String msg = (requiredVer > 0)
                         ? "Falta Java " + requiredVer + ". Por favor, descárgalo desde la pestaña de Java en el launcher."
                         : "No se encontró Java en el sistema. Por favor, instala Java o descarga una versión portátil desde el launcher.";
                     throw new IllegalStateException(msg);
@@ -302,7 +329,7 @@ public final class LauncherFacade {
             // Si hay una ruta específica (portátil o manual), verificar que el archivo físico exista
             Path javaPath = Path.of(effectiveJava);
             if (!Files.exists(javaPath)) {
-                throw new IllegalStateException("El ejecutable de Java no existe en la ruta: " + effectiveJava + 
+                throw new IllegalStateException("El ejecutable de Java no existe en la ruta: " + effectiveJava +
                     ". Por favor, intenta descargar la versión de Java de nuevo desde la pestaña Java.");
             }
         }
@@ -317,6 +344,38 @@ public final class LauncherFacade {
                 jvm,
                 effectiveJava,
                 LaunchFeatures.defaults());
+    }
+
+    /**
+     * Limita -Xmx al valor más bajo entre lo pedido y el cap de RAM seguro.
+     * Convierte la unidad (G/M/K) a MiB para comparar, luego escribe en MiB.
+     */
+    private static List<String> capHeapArg(List<String> args, long maxMiB) {
+        List<String> out = new java.util.ArrayList<>();
+        for (String arg : args) {
+            if (arg.startsWith("-Xmx")) {
+                long requested = parseMemMiB(arg.substring(4));
+                if (requested > 0 && requested > maxMiB) {
+                    out.add("-Xmx" + maxMiB + "m");
+                    continue;
+                }
+            }
+            out.add(arg);
+        }
+        return out;
+    }
+
+    private static long parseMemMiB(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        String u = s.toUpperCase();
+        try {
+            if (u.endsWith("G")) return Long.parseLong(u.substring(0, u.length() - 1)) * 1024;
+            if (u.endsWith("M")) return Long.parseLong(u.substring(0, u.length() - 1));
+            if (u.endsWith("K")) return Long.parseLong(u.substring(0, u.length() - 1)) / 1024;
+            return Long.parseLong(u) / (1024 * 1024);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private void enforceVersionIsolation(Path profileDir, String currentVersion, Consumer<String> log) {
@@ -450,7 +509,10 @@ public final class LauncherFacade {
         Process process = pb.start();
         
         applyProcessPriorityWindows(process, log);
-        applyCpuAffinity(process, log);
+        // CPU Affinity deshabilitada: taskset sin -a solo mueve el hilo principal,
+        // y junto con -XX:ActiveProcessorCount=<logicos> crea más hilos de GC/JIT
+        // que CPUs realmente disponibles para el proceso — contraproducente.
+        // applyCpuAffinity(process, log);
         
         // Crear servicio de crash report para esta sesión
         CrashReportService crashReporter;
@@ -532,26 +594,30 @@ public final class LauncherFacade {
         }
         String s = TlauncherConfigReader.suggestedJvmArgsFromTlauncher();
         if (!s.isBlank()) {
-            p.customJvmArgs = s;
+            // Filtrar flags de memoria y GC para no pisar silenciosamente el preset
+            String[] tokens = s.split("\\s+");
+            java.util.List<String> filtered = new java.util.ArrayList<>();
+            for (String token : tokens) {
+                if (token.startsWith("-Xmx") || token.startsWith("-Xms") || 
+                    token.contains("+UseG1GC") || token.contains("+UseZGC") || 
+                    token.contains("+UseParallelGC") || token.contains("+UseSerialGC") ||
+                    token.contains("+UseShenandoahGC")) {
+                    continue;
+                }
+                filtered.add(token);
+            }
+            p.customJvmArgs = String.join(" ", filtered).trim();
         }
     }
     
     private void applyProcessPriority(ProcessBuilder pb, java.util.function.Consumer<String> log) {
         OsContext os = com.experimento.launcher.mojang.OsContext.current();
-        
+
         if (os.isLinux() || os.isMac()) {
-            try {
-                List<String> originalCmd = new java.util.ArrayList<>(pb.command());
-                List<String> niceCmd = new java.util.ArrayList<>();
-                niceCmd.add("nice");
-                niceCmd.add("-n");
-                niceCmd.add("-10");
-                niceCmd.addAll(originalCmd);
-                pb.command(niceCmd);
-                log.accept("[LAUNCHER] ⚡ Prioridad nice -10 (alta) activada");
-            } catch (Exception e) {
-                log.accept("[LAUNCHER] ⚠️ No se pudo configurar prioridad: " + e.getMessage());
-            }
+            // nice -n <negativo> requiere CAP_SYS_NICE o root — siempre falla en usuario normal.
+            // Se omite el wrapping con nice en Linux/Mac para no generar logs engañosos.
+            // En Windows se usa applyProcessPriorityWindows (PowerShell, no requiere elevar).
+            log.accept("[LAUNCHER] ℹ️ Prioridad de proceso: gestionada por el planificador del OS");
         }
     }
 

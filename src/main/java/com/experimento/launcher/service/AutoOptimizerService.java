@@ -21,6 +21,23 @@ public final class AutoOptimizerService {
     public static void applyOptionsTxt(Path gameDir, LauncherProfile profile, long totalRamMiB) throws Exception {
         Files.createDirectories(gameDir);
         Path opt = gameDir.resolve("options.txt");
+        Path optState = gameDir.resolve(".meacore_optimized");
+
+        JvmPresetKind kind =
+                profile.jvmPreset == JvmPresetKind.AUTO
+                        ? JvmPresetService.resolveAutoKind(totalRamMiB)
+                        : profile.jvmPreset;
+
+        String currentPresetName = kind.name();
+        
+        // Solo sobreescribir si el preset cambió (para no deshacer ajustes del usuario constantemente)
+        if (Files.exists(optState) && Files.exists(opt)) {
+            String lastApplied = Files.readString(optState).trim();
+            if (lastApplied.equals(currentPresetName)) {
+                return;
+            }
+        }
+
         Map<String, String> existing = new LinkedHashMap<>();
         if (Files.isRegularFile(opt)) {
             for (String line : Files.readAllLines(opt)) {
@@ -31,10 +48,7 @@ public final class AutoOptimizerService {
                 }
             }
         }
-        JvmPresetKind kind =
-                profile.jvmPreset == JvmPresetKind.AUTO
-                        ? JvmPresetService.resolveAutoKind(totalRamMiB)
-                        : profile.jvmPreset;
+
         Map<String, String> patch =
                 switch (kind) {
                     case LOW            -> lowOptions();
@@ -49,6 +63,7 @@ public final class AutoOptimizerService {
                         .collect(Collectors.joining("\n"))
                         + "\n";
         Files.writeString(opt, body);
+        Files.writeString(optState, currentPresetName);
     }
 
     private static Map<String, String> lowOptions() {
